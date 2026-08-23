@@ -15,14 +15,12 @@ reducing unnecessary data movement.
 
 ## Reference Paper
 
-A Scalable All-Digital Near-Memory Computing Architecture
-for Edge AIoT Applications
-
-IEEE Access, 2025
+> **A Scalable All-Digital Near-Memory Computing Architecture for Edge AIoT Applications**  
+> IEEE Access, 2025
 
 ## Architecture
 
-
+```text
 RISC-V / Host
      |
      v
@@ -35,6 +33,7 @@ Shared Memory
      +---- Bank 2 ---- NMC Unit ---- PE Array
      |
      +---- Bank 3 ---- NMC Unit ---- PE Array
+```
 
 ## Main Modules
 
@@ -50,19 +49,23 @@ Shared Memory
 
 ## Dataflow
 
+
+```text
+
 Input Feature Map
         ↓
-Memory
+      Memory
         ↓
-Register File
+  Register File
         ↓
-PE Array
+     PE Array
         ↓
-MAC
+       MAC
         ↓
-Partial Sum
+    Partial Sum
         ↓
-OFMap Memory
+   OFMap Memory
+```
 
 ## Supported Operations
 
@@ -79,6 +82,7 @@ Simulation using:
 
 ## Status
 
+```text
 [ ] Memory subsystem
 [ ] PE
 [ ] MAC
@@ -89,3 +93,4 @@ Simulation using:
 [ ] Top-level integration
 [ ] Verification
 [ ] Synthesis
+```
