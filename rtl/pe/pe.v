@@ -1,10 +1,16 @@
-module pe (
+module pe #(
+    parameter DATA_WIDTH = 8,
+    parameter ACC_WIDTH = 32
+)(
     input clk, rst, clear, en,
-    input signed [7:0] a, b,
-    output signed [31:0] acc_out
+    input signed [DATA_WIDTH-1:0] a, b,
+    output reg signed [ACC_WIDTH-1:0] acc_out
 );
 
-    mac m0(
+    mac #(
+        .DATA_WIDTH(DATA_WIDTH),
+        .ACC_WIDTH(ACC_WIDTH)
+    ) m0(
         .clk(clk), 
         .rst(rst), 
         .clear(clear), 
