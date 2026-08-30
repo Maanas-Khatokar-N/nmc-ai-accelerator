@@ -1,13 +1,13 @@
 module pe_array #(
     parameter NUM_PE = 16,
     parameter DATA_WIDTH = 8,
-    parameter ACC_WIDTH = 32
+    parameter ACC_WIDTH = 32,
     parameter TOTAL_DATA_WIDTH = NUM_PE*DATA_WIDTH,
     parameter TOTAL_ACC_WIDTH = NUM_PE*ACC_WIDTH
 ) (
     input clk, rst, clear, en,
     input signed [TOTAL_DATA_WIDTH-1:0] a, b,
-    output signed [TOTAL_ACC_WIDTH-1:0] acc_out
+    output wire signed [TOTAL_ACC_WIDTH-1:0] acc_out
 );
 
     genvar i;

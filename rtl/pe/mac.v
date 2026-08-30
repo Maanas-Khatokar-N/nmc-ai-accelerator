@@ -4,7 +4,7 @@ module mac #(
 )(
     input clk, rst, clear, en,
     input signed [DATA_WIDTH-1:0] a, b,
-    output signed [ACC_WIDTH-1:0] acc_out
+    output reg signed [ACC_WIDTH-1:0] acc_out
 );
 
     
