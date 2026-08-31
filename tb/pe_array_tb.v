@@ -40,15 +40,26 @@ module pe_array_tb #(
     always #5 clk <= ~clk;
 
     initial begin
+        
         #7 en <= 1'b1;
-        a <= 128'd2;
-        b <= 128'd3;
+        a <= 2;
+        b <= 3;
 
         #10
         a <= 4;
         b <= 5;
 
-        #50 $finish;
+        #10
+        a <= -2;
+        b <= 3;
+
+        #10 en <= 1'b0;
+        #10 en <= 1'b1;
+
+        #10 clear <= 1'b1;
+
+
+        #200 $finish;
     end
 
     initial begin
