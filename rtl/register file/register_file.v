@@ -24,8 +24,9 @@ module register_file #(
 
 
     //Asynchronous read
+    integer i;
+
     always @(*) begin
-        integer i;
         for (i = 0; i < NUM_READ_PORTS; i=i+1) begin
 
             //Read data for each port using read_addr 
@@ -34,24 +35,25 @@ module register_file #(
     end
 
 
+    integer j;
+    integer k;
+
     always @(posedge clk or posedge rst) begin
 
         //Reset
         if (rst) begin
-            integer i;
-            for (i = 0; i < DEPTH; i=i+1) begin
-                memory[i] <= {DATA_WIDTH{0}};       //Reset memory -> Read ports also gets reset
+            for (j = 0; j < DEPTH; j=j+1) begin
+                memory[j] <= {DATA_WIDTH{1'b0}};       //Reset memory -> Read ports also gets reset
             end
         end
 
         //Synchronous write
         else begin
-            integer i;
-            for (i = 0; i < NUM_WRITE_PORTS; i=i+1) begin
-                if (write_en[i]) begin
+            for (k = 0; k < NUM_WRITE_PORTS; k=k+1) begin
+                if (write_en[k]) begin
 
                     //Write data for each port using write_addr 
-                    memory[write_addr[(i+1)*ADDR_WIDTH-1 -: ADDR_WIDTH]] <= write_data[(i+1)*DATA_WIDTH-1 -: DATA_WIDTH];
+                    memory[write_addr[(k+1)*ADDR_WIDTH-1 -: ADDR_WIDTH]] <= write_data[(k+1)*DATA_WIDTH-1 -: DATA_WIDTH];
                 end
             end
         end
