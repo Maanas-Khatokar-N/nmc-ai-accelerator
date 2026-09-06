@@ -2,7 +2,7 @@
 
 A synthesizable Verilog implementation of a scalable
 all-digital Near-Memory Computing (NMC) architecture
-for AI acceleration.
+for AI workloads.
 
 ## Motivation
 
@@ -65,32 +65,4 @@ Input Feature Map
     Partial Sum
         ↓
    OFMap Memory
-```
-
-## Supported Operations
-
-- Multiply
-- Accumulate
-- Convolution
-- Partial-sum accumulation
-
-## Verification
-
-Simulation using:
-- Icarus Verilog
-- GTKWave
-
-## Status
-
-```text
-[ ] Memory subsystem
-[ ] PE
-[ ] MAC
-[ ] Address generator
-[ ] Controller
-[ ] Arbiter
-[ ] AI datapath
-[ ] Top-level integration
-[ ] Verification
-[ ] Synthesis
 ```
