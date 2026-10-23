@@ -1,17 +1,12 @@
 `timescale 1ns/1ps
 // ============================================================================
-// End-to-end, self-checking testbench for the address generator.
+// End-to-end, self-checking testbench: address generator + ACCESS CONTROLLER
 //
 //   core port (tb) --> sram_bank <--NMC port-- address_generator
-//                                         |
-//        IFMap RF / weight RF  --> PE array (4x4) --> acc --> store --> OFMap in SRAM
+//        IFMap RF / weight RF --> access_controller --> PE array --> store --> OFMap
 //
-// The access controller (next block) is replaced here by ~10 lines of glue:
-//   operand_ok = all ACTIVE lanes' RF words valid & weight valid
-//   mac_en     = seq_valid & operand_ok      (also seq_enable)
 // The OFMap written to SRAM is compared word by word with a software
-// convolution. Every case runs twice: quiet, and with random core reads hammering
-// the bank (forces NMC requests to be blocked and retried).
+// convolution. Every case runs quiet and with random core reads hammering the bank.
 // ============================================================================
 module address_generator_tb;
 
@@ -19,7 +14,7 @@ module address_generator_tb;
     localparam DIM_WIDTH  = 16;
     localparam RF_AW      = 8;
     localparam NM         = 8;
-    localparam DEPTH_PM   = 1024;                 // words per macro -> 8192 words
+    localparam DEPTH_PM   = 1024;
     localparam MAW        = $clog2(DEPTH_PM);
     localparam CAW        = 3 + MAW;
     localparam NUM_PE     = 16;
@@ -32,7 +27,6 @@ module address_generator_tb;
     reg clk = 0, rst = 1;
     always #5 clk = ~clk;
 
-    // ---------------- descriptor ----------------
     reg start = 0;
     wire done;
     reg [DIM_WIDTH-1:0]  d_ifmap_cols = 0, d_kr = 0, d_kc = 0, d_cin = 0, d_cout = 0, d_stride = 1;
@@ -40,7 +34,6 @@ module address_generator_tb;
     reg [ADDR_WIDTH-1:0] d_if_ch = 0, d_of_ch = 0, d_if_rstep = 0;
     reg [RF_AW-1:0]      d_rf_rstep = 0, d_rf_ch = 0;
 
-    // ---------------- DUT ----------------
     wire compute_start, seq_valid, seq_last, ifrf_flush, wrf_flush;
     wire [NUM_PE*RF_AW-1:0] ifmap_rf_addr;
     wire [RF_AW-1:0]        weight_rf_addr;
@@ -52,8 +45,7 @@ module address_generator_tb;
     wire [NM*LANE_W-1:0]    st_lane_sel;
     wire [NM*32-1:0]        nmc_wdata, nmc_rdata;
 
-    reg  compute_done;
-    wire mac_fire;
+    wire compute_done, seq_enable;
 
     address_generator #(
         .ADDR_WIDTH(ADDR_WIDTH), .DIM_WIDTH(DIM_WIDTH), .RF_AW(RF_AW),
@@ -69,7 +61,7 @@ module address_generator_tb;
         .weight_base_addr(W_BASE[ADDR_WIDTH-1:0]),
         .ofmap_base_addr(OFM_BASE[ADDR_WIDTH-1:0]),
         .compute_start(compute_start), .compute_done(compute_done),
-        .seq_enable(mac_fire), .seq_valid(seq_valid), .seq_last(seq_last),
+        .seq_enable(seq_enable), .seq_valid(seq_valid), .seq_last(seq_last),
         .ifmap_rf_addr(ifmap_rf_addr), .weight_rf_addr(weight_rf_addr), .pe_mask(pe_mask),
         .ifrf_flush(ifrf_flush), .wrf_flush(wrf_flush),
         .ifrf_wr_en(ifrf_wr_en), .wrf_wr_en(wrf_wr_en), .rf_wr_addr(rf_wr_addr),
@@ -77,7 +69,6 @@ module address_generator_tb;
         .st_lane_sel(st_lane_sel)
     );
 
-    // ---------------- SRAM bank + core port (testbench) ----------------
     reg                core_req = 0, core_we = 0;
     reg  [CAW-1:0]     core_addr = 0;
     reg  [31:0]        core_wdata = 0;
@@ -99,37 +90,44 @@ module address_generator_tb;
         assign rf_wdata8[gi*8 +: 8] = nmc_rdata[gi*32 +: 8];
     end endgenerate
 
+    wire [NUM_PE-1:0] ifrf_read_en;
+    wire              wrf_read_en;
     wire [NUM_PE*8-1:0] i_rd;  wire [NUM_PE-1:0] i_rv;  wire [NM-1:0] i_blk;
     wire [7:0]          w_rd;  wire [0:0]        w_rv;  wire [NM-1:0] w_blk;
 
     register_file #(.DATA_WIDTH(8), .DEPTH(256), .NUM_READ_PORTS(NUM_PE), .NUM_WRITE_PORTS(NM)) ifrf (
         .clk(clk), .rst(rst), .flush(ifrf_flush),
         .write_en(ifrf_wr_en), .write_addr(rf_wr_addr), .write_data(rf_wdata8), .write_blocked(i_blk),
-        .read_en(pe_mask & {NUM_PE{mac_fire}}), .read_last({NUM_PE{1'b0}}),
+        .read_en(ifrf_read_en), .read_last({NUM_PE{1'b0}}),
         .read_addr(ifmap_rf_addr), .read_data(i_rd), .read_valid(i_rv));
 
     register_file #(.DATA_WIDTH(8), .DEPTH(256), .NUM_READ_PORTS(1), .NUM_WRITE_PORTS(NM)) wrf (
         .clk(clk), .rst(rst), .flush(wrf_flush),
         .write_en(wrf_wr_en), .write_addr(rf_wr_addr), .write_data(rf_wdata8), .write_blocked(w_blk),
-        .read_en(mac_fire), .read_last(1'b0),
+        .read_en(wrf_read_en), .read_last(1'b0),
         .read_addr(weight_rf_addr), .read_data(w_rd), .read_valid(w_rv));
 
-    // ---------------- access-controller stand-in + PE array ----------------
-    wire operand_ok = (&(i_rv | ~pe_mask)) & w_rv[0];
-    assign mac_fire = seq_valid & operand_ok;
+    // ---------------- access controller + PE array ----------------
+    wire pe_clear, pe_mac_en, pe_psum_load, ac_stall;
+    wire [NUM_PE-1:0] psrf_read_en, psrf_read_last;
+    wire psum_ack;
+
+    access_controller #(.NUM_PE(NUM_PE)) ac (
+        .clk(clk), .rst(rst),
+        .compute_start(compute_start), .seq_valid(seq_valid), .seq_last(seq_last), .pe_mask(pe_mask),
+        .seq_enable(seq_enable), .compute_done(compute_done),
+        .ifrf_read_valid(i_rv), .wrf_read_valid(w_rv[0]),
+        .ifrf_read_en(ifrf_read_en), .wrf_read_en(wrf_read_en),
+        .psum_req(1'b0), .psrf_read_valid({NUM_PE{1'b0}}),     // reload path not wired yet
+        .psrf_read_en(psrf_read_en), .psrf_read_last(psrf_read_last), .psum_ack(psum_ack),
+        .pe_clear(pe_clear), .pe_mac_en(pe_mac_en), .pe_psum_load(pe_psum_load), .stall(ac_stall));
 
     wire signed [NUM_PE*32-1:0] acc_out;
     pe_array #(.WEIGHT_BROADCAST(1)) pea (
-        .clk(clk), .rst(rst), .clear(compute_start), .pe_mask(pe_mask),
-        .psum_load(1'b0), .mac_en(mac_fire), .psum_in({NUM_PE*32{1'b0}}),
+        .clk(clk), .rst(rst), .clear(pe_clear), .pe_mask(pe_mask),
+        .psum_load(pe_psum_load), .mac_en(pe_mac_en), .psum_in({NUM_PE*32{1'b0}}),
         .ifmap_in(i_rd), .weight_in(w_rd), .acc_out(acc_out));
 
-    // acc is final one cycle after the last MAC
-    always @(posedge clk or posedge rst)
-        if (rst) compute_done <= 1'b0;
-        else     compute_done <= mac_fire & seq_last;
-
-    // store data routing: macro m is driven by accumulator st_lane_sel[m]
     generate for (gi = 0; gi < NM; gi = gi + 1) begin : g_st
         wire [LANE_W-1:0] sel = st_lane_sel[gi*LANE_W +: LANE_W];
         assign nmc_wdata[gi*32 +: 32] = acc_out[sel*32 +: 32];
@@ -140,10 +138,9 @@ module address_generator_tb;
     always @(negedge clk) if (noise_en) begin
         core_req   = ($random & 1);
         core_we    = 1'b0;
-        core_addr  = $random;           // truncated to CAW bits
+        core_addr  = $random;
     end
 
-    // ---------------- helpers ----------------
     integer errors = 0, total_errors = 0;
 
     task core_write(input [CAW-1:0] a, input [31:0] d);
@@ -161,7 +158,6 @@ module address_generator_tb;
         end
     endtask
 
-    // software model data
     reg signed [7:0] ifm [0:4095];
     reg signed [7:0] wgt [0:4095];
 
@@ -169,8 +165,13 @@ module address_generator_tb;
     integer ofr, ofc, patch_r, patch_c;
     integer c, r, col, oc, ic, ki, kj, idx, cyc;
     integer i;
+    integer stall_cycles;
     reg signed [31:0] exp_v;
     reg [31:0] rd;
+
+    always @(posedge clk) if (start || dut.state != 0) begin
+        if (ac_stall) stall_cycles = stall_cycles + 1;
+    end
 
     task run_case(input integer p_ifr, input integer p_ifc, input integer p_kr, input integer p_kc,
                   input integer p_cin, input integer p_cout, input integer p_s, input integer p_noise);
@@ -182,31 +183,28 @@ module address_generator_tb;
             patch_r = 3*s + kr;
             patch_c = 3*s + kc;
             errors = 0;
+            stall_cycles = 0;
 
             if (cin*patch_r*patch_c > 256 || cin*kr*kc > 256) begin
                 $display("SKIP case (doesn't fit RF): %0dx%0d K%0dx%0d Cin%0d Cout%0d S%0d", ifr, ifc, kr, kc, cin, cout, s);
             end else begin
                 noise_en = 0; core_req = 0; core_we = 0;
 
-                // descriptor, exactly as software would precompute it
                 d_ifmap_cols = ifc;  d_kr = kr; d_kc = kc; d_cin = cin; d_cout = cout; d_stride = s;
                 d_ofr = ofr; d_ofc = ofc;
                 d_if_ch = ifr*ifc;   d_of_ch = ofr*ofc;   d_if_rstep = s*ifc;
                 d_rf_rstep = s*patch_c;  d_rf_ch = patch_r*patch_c;
                 d_wpo = cin*kr*kc;
 
-                // random data
                 for (i = 0; i < cin*ifr*ifc;  i = i + 1) ifm[i] = ($random & 15) - 8;
                 for (i = 0; i < cout*cin*kr*kc; i = i + 1) wgt[i] = ($random & 7) - 4;
 
-                // load SRAM (one element per 32-bit word)
                 for (i = 0; i < cin*ifr*ifc;  i = i + 1) core_write(IFM_BASE + i, {24'b0, ifm[i]});
                 for (i = 0; i < cout*cin*kr*kc; i = i + 1) core_write(W_BASE + i, {24'b0, wgt[i]});
                 for (i = 0; i < cout*ofr*ofc + 16; i = i + 1) core_write(OFM_BASE + i, 32'hDEADBEEF);
 
                 noise_en = p_noise;
 
-                // run the layer
                 @(negedge clk); start = 1;
                 @(negedge clk); start = 0;
                 cyc = 0;
@@ -214,7 +212,6 @@ module address_generator_tb;
                 if (!done) begin $display("TIMEOUT"); errors = errors + 1; end
                 noise_en = 0; @(negedge clk); core_req = 0;
 
-                // check OFMap against the software convolution
                 for (oc = 0; oc < cout; oc = oc + 1)
                   for (r = 0; r < ofr; r = r + 1)
                     for (col = 0; col < ofc; col = col + 1) begin
@@ -232,14 +229,13 @@ module address_generator_tb;
                                 $display("  MISMATCH oc%0d (%0d,%0d): got %0d exp %0d", oc, r, col, $signed(rd), exp_v);
                         end
                     end
-                // guard words past the OFMap must be untouched
                 for (i = 0; i < 16; i = i + 1) begin
                     core_read(OFM_BASE + cout*ofr*ofc + i, rd);
                     if (rd !== 32'hDEADBEEF) begin errors = errors + 1; $display("  GUARD overwritten at +%0d", i); end
                 end
 
-                $display("%s  ifm %0dx%0dx%0d  K%0dx%0d  Cout %0d  S%0d  noise=%0d  cycles=%0d  errors=%0d",
-                         (errors == 0) ? "PASS" : "FAIL", ifr, ifc, cin, kr, kc, cout, s, p_noise, cyc, errors);
+                $display("%s  ifm %0dx%0dx%0d  K%0dx%0d  Cout %0d  S%0d  noise=%0d  cycles=%0d  stalls=%0d  errors=%0d",
+                         (errors == 0) ? "PASS" : "FAIL", ifr, ifc, cin, kr, kc, cout, s, p_noise, cyc, stall_cycles, errors);
                 total_errors = total_errors + errors;
             end
         end
