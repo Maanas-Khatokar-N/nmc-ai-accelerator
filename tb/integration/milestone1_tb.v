@@ -38,6 +38,8 @@ module milestone1_tb;
     wire [NM-1:0]           nmc_req, nmc_we, nmc_grant, nmc_blocked, nmc_rvalid;
     wire [NM*MAW-1:0]       nmc_addr;
     wire [NM*32-1:0]        nmc_wdata, nmc_rdata;
+    wire perf_valid; wire [47:0] p_total, p_load, p_comp, p_store, p_mac, p_stall, p_blk, p_ops;
+
 
     nmc_unit #(
         .ADDR_WIDTH(ADDR_WIDTH), .DIM_WIDTH(DIM_WIDTH), .RF_AW(RF_AW),
@@ -55,7 +57,10 @@ module milestone1_tb;
         .nmc_req(nmc_req), .nmc_we(nmc_we), .nmc_addr(nmc_addr), .nmc_wdata(nmc_wdata),
         .nmc_grant(nmc_grant), .nmc_rdata(nmc_rdata),
         .dbg_compute_start(compute_start), .dbg_compute_done(compute_done),
-        .dbg_mac_en(pe_mac_en), .dbg_stall(ac_stall), .dbg_acc_out(acc_out)
+        .dbg_mac_en(pe_mac_en), .dbg_stall(ac_stall), .dbg_acc_out(acc_out),
+        .perf_valid(perf_valid), .perf_cyc_total(p_total), .perf_cyc_load(p_load),
+        .perf_cyc_compute(p_comp), .perf_cyc_store(p_store), .perf_cyc_mac(p_mac),
+        .perf_cyc_stall(p_stall), .perf_cyc_mem_blocked(p_blk), .perf_mac_ops(p_ops)
     );
 
     reg                core_req = 0, core_we = 0;
@@ -179,7 +184,14 @@ module milestone1_tb;
             if (stall_cycles !== 0)                        begin errors = errors + 1; $display("  FAIL stalls = %0d", stall_cycles); end
             if (seen_cdone !== 1)                          begin errors = errors + 1; $display("  FAIL compute_done pulses = %0d", seen_cdone); end
             if (t_cdone - t_last_mac !== 1)                begin errors = errors + 1; $display("  FAIL compute_done latency %0d (want 1)", t_cdone - t_last_mac); end
-
+            if (!perf_valid)                       begin errors = errors + 1; $display("  FAIL perf_valid"); end
+            if (p_total !== t_done - t_start)      begin errors = errors + 1; $display("  FAIL perf total %0d vs %0d", p_total, t_done - t_start); end
+            if (p_mac !== 9 || p_ops !== 9*16)     begin errors = errors + 1; $display("  FAIL perf mac %0d ops %0d", p_mac, p_ops); end
+            if (p_stall !== 0)                     begin errors = errors + 1; $display("  FAIL perf stall %0d", p_stall); end
+            
+            $display("      perf: total=%0d load=%0d compute=%0d store=%0d blocked=%0d | PE activity=%0d%%  layer eff=%0d%%",
+                    p_total, p_load, p_comp, p_store, p_blk,
+                    (100*p_ops)/(16*p_mac), (100*p_ops)/(16*p_total));
             $display("%s  noise=%0d | 16/16 outputs checked | MAC cycles=%0d (contiguous), stalls=%0d",
                      errors == 0 ? "PASS" : "FAIL", noise, mac_cycles, stall_cycles);
             $display("      timeline (cycles): start->compute_start=%0d  compute_start->first MAC=%0d  MACs=%0d  last MAC->compute_done=%0d  compute_done->layer done=%0d  total=%0d",

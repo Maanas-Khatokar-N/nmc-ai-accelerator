@@ -29,7 +29,8 @@ module nmc_unit #(
     parameter DATA_WIDTH = 8,
     parameter ACC_WIDTH  = 32,
     parameter NUM_PE     = PE_ROWS * PE_COLS,
-    parameter LANE_W     = $clog2(NUM_PE)
+    parameter LANE_W     = $clog2(NUM_PE),
+    parameter CNT_W = 48
 )(
     input  wire clk,
     input  wire rst,
@@ -68,7 +69,11 @@ module nmc_unit #(
     output wire                             dbg_compute_done,
     output wire                             dbg_mac_en,
     output wire                             dbg_stall,
-    output wire [NUM_PE*ACC_WIDTH-1:0]      dbg_acc_out
+    output wire [NUM_PE*ACC_WIDTH-1:0]      dbg_acc_out,
+
+    output wire                perf_valid,
+    output wire [CNT_W-1:0]    perf_cyc_total, perf_cyc_load, perf_cyc_compute, perf_cyc_store,
+    output wire [CNT_W-1:0]    perf_cyc_mac, perf_cyc_stall, perf_cyc_mem_blocked, perf_mac_ops
 );
 
     // ---------------- address generator ----------------
@@ -80,6 +85,7 @@ module nmc_unit #(
     wire [NUM_MACROS-1:0]   ifrf_wr_en, wrf_wr_en;
     wire [NUM_MACROS*RF_AW-1:0] rf_wr_addr;
     wire [NUM_MACROS*LANE_W-1:0] st_lane_sel;
+    wire ph_load, ph_compute, ph_store;
 
     address_generator #(
         .ADDR_WIDTH(ADDR_WIDTH), .DIM_WIDTH(DIM_WIDTH), .RF_AW(RF_AW),
@@ -99,7 +105,8 @@ module nmc_unit #(
         .ifrf_flush(ifrf_flush), .wrf_flush(wrf_flush),
         .ifrf_wr_en(ifrf_wr_en), .wrf_wr_en(wrf_wr_en), .rf_wr_addr(rf_wr_addr),
         .nmc_req(nmc_req), .nmc_we(nmc_we), .nmc_addr(nmc_addr), .nmc_grant(nmc_grant),
-        .st_lane_sel(st_lane_sel)
+        .st_lane_sel(st_lane_sel),
+        .ph_load(ph_load), .ph_compute(ph_compute), .ph_store(ph_store)
     );
 
     // ---------------- register files (RF write data = low byte of the macro read data) ----------------
@@ -150,6 +157,17 @@ module nmc_unit #(
         .clk(clk), .rst(rst), .clear(pe_clear), .pe_mask(pe_mask),
         .psum_load(pe_psum_load), .mac_en(pe_mac_en), .psum_in({NUM_PE*ACC_WIDTH{1'b0}}),
         .ifmap_in(if_rd), .weight_in(w_rd), .acc_out(acc_out));
+
+    perf_counters #(.NUM_PE(NUM_PE), .CNT_W(CNT_W)) u_perf (
+        .clk(clk), .rst(rst), .start(start), .done(done),
+        .mac_en(pe_mac_en), .pe_mask(pe_mask), .stall(ac_stall),
+        .mem_blocked(|(nmc_req & ~nmc_grant)),
+        .ph_load(ph_load), .ph_compute(ph_compute), .ph_store(ph_store),
+        .running(), .perf_valid(perf_valid),
+        .cyc_total(perf_cyc_total), .cyc_load(perf_cyc_load),
+        .cyc_compute(perf_cyc_compute), .cyc_store(perf_cyc_store),
+        .cyc_mac(perf_cyc_mac), .cyc_stall(perf_cyc_stall),
+        .cyc_mem_blocked(perf_cyc_mem_blocked), .mac_ops(perf_mac_ops));
 
     // ---------------- store data mux ----------------
     generate for (gi = 0; gi < NUM_MACROS; gi = gi + 1) begin : g_st

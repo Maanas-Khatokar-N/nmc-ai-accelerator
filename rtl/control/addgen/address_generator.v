@@ -109,7 +109,11 @@ module address_generator #(
     output wire [NUM_MACROS-1:0]          nmc_we,
     output wire [NUM_MACROS*MACRO_AW-1:0] nmc_addr,
     input  wire [NUM_MACROS-1:0]          nmc_grant,
-    output wire [NUM_MACROS*LANE_W-1:0]   st_lane_sel
+    output wire [NUM_MACROS*LANE_W-1:0]   st_lane_sel,
+
+    output wire                           ph_load,
+    output wire                           ph_compute,
+    output wire                           ph_store
 );
 
     localparam VR_W = $clog2(PE_ROWS + 1);
@@ -142,6 +146,11 @@ module address_generator #(
     reg [DIM_WIDTH-1:0]  oc;
     reg [ADDR_WIDTH-1:0] oc_w_ptr;     // weight words of the current output channel
     reg [ADDR_WIDTH-1:0] oc_of_ptr;    // OFMap tile origin of the current output channel
+
+    assign ph_load    = (state == S_LDP_GO) || (state == S_LDP_WAIT) ||
+                        (state == S_LDW_GO) || (state == S_LDW_WAIT);
+    assign ph_compute = (state == S_CMP_GO) || (state == S_CMP_WAIT);
+    assign ph_store   = (state == S_ST_GO)  || (state == S_ST_WAIT);
 
     // ------------------------------------------------------------------
     // 1. Tile scheduler
