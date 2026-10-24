@@ -65,8 +65,8 @@ module address_generator #(
 )(
     input  wire clk,
     input  wire rst,
-    input  wire start,          // start one layer
-    output reg  done,           // layer finished (1-cycle pulse)
+    input  wire start,
+    output reg  done,
 
     // ---------------- layer descriptor ----------------
     input  wire [DIM_WIDTH-1:0]  ifmap_cols,
@@ -95,14 +95,23 @@ module address_generator #(
     output wire                    seq_last,
     output wire [NUM_PE*RF_AW-1:0] ifmap_rf_addr,
     output wire [RF_AW-1:0]        weight_rf_addr,
-    output wire [NUM_PE-1:0]       pe_mask,
+    output wire [NUM_PE-1:0]       pe_mask,          // mask of the tile being COMPUTED
 
-    // ---------------- register files ----------------
+    // ---------------- register files (ping-pong) ----------------
     output wire                        ifrf_flush,
+    output wire                        ifrf_flush_sel,
+    output wire                        ifrf_wr_sel,
+    output wire                        ifrf_rd_sel,
     output wire                        wrf_flush,
+    output wire                        wrf_flush_sel,
+    output wire                        wrf_wr_sel,
+    output wire                        wrf_rd_sel,
     output wire [NUM_MACROS-1:0]       ifrf_wr_en,
     output wire [NUM_MACROS-1:0]       wrf_wr_en,
     output wire [NUM_MACROS*RF_AW-1:0] rf_wr_addr,
+
+    // ---------------- OFMap shadow ----------------
+    output wire                        st_capture,   // acc_out -> shadow register (datapath)
 
     // ---------------- NMC memory port ----------------
     output wire [NUM_MACROS-1:0]          nmc_req,
@@ -119,68 +128,85 @@ module address_generator #(
     localparam VR_W = $clog2(PE_ROWS + 1);
     localparam VC_W = $clog2(PE_COLS + 1);
 
-    // patch_cols = (PE_COLS-1)*stride + kernel_cols  (constant multiplier = shift-add)
     wire [DIM_WIDTH-1:0] patch_cols = (PE_COLS - 1) * stride + kernel_cols;
 
-    // ------------------------------------------------------------------
-    // FSM
-    // ------------------------------------------------------------------
-    localparam [3:0] S_IDLE       = 4'd0,
-                     S_TILE_FLUSH = 4'd1,
-                     S_LDP_GO     = 4'd2,
-                     S_LDP_WAIT   = 4'd3,
-                     S_OC_FLUSH   = 4'd4,
-                     S_LDW_GO     = 4'd5,
-                     S_LDW_WAIT   = 4'd6,
-                     S_CMP_GO     = 4'd7,
-                     S_CMP_WAIT   = 4'd8,
-                     S_ST_GO      = 4'd9,
-                     S_ST_WAIT    = 4'd10,
-                     S_NEXT_OC    = 4'd11,
-                     S_NEXT_TILE  = 4'd12,
-                     S_CHECK      = 4'd13,
-                     S_FINISH     = 4'd14;
-
-    reg [3:0] state;
-
-    reg [DIM_WIDTH-1:0]  oc;
-    reg [ADDR_WIDTH-1:0] oc_w_ptr;     // weight words of the current output channel
-    reg [ADDR_WIDTH-1:0] oc_of_ptr;    // OFMap tile origin of the current output channel
-
-    assign ph_load    = (state == S_LDP_GO) || (state == S_LDP_WAIT) ||
-                        (state == S_LDW_GO) || (state == S_LDW_WAIT);
-    assign ph_compute = (state == S_CMP_GO) || (state == S_CMP_WAIT);
-    assign ph_store   = (state == S_ST_GO)  || (state == S_ST_WAIT);
+    reg  layer_busy;
+    wire layer_start = start && !layer_busy;
 
     // ------------------------------------------------------------------
-    // 1. Tile scheduler
+    // Loader FSM (producer): [flush half, load patch] per tile,
+    //                        [flush half, load weights] per output channel
     // ------------------------------------------------------------------
-    wire                  ts_start   = (state == S_IDLE) && start;
-    wire                  ts_advance = (state == S_NEXT_TILE);
+    localparam [3:0] L_IDLE     = 4'd0,  L_WAIT_IF  = 4'd1,  L_IF_FLUSH = 4'd2,
+                     L_LDP_GO   = 4'd3,  L_LDP_WAIT = 4'd4,  L_WAIT_W   = 4'd5,
+                     L_W_FLUSH  = 4'd6,  L_LDW_GO   = 4'd7,  L_LDW_WAIT = 4'd8,
+                     L_NEXT_OC  = 4'd9,  L_CHECK    = 4'd10;
+    reg [3:0]            lstate;
+    reg                  ld_ifb, ld_wb;          // half the loader is filling
+    reg [DIM_WIDTH-1:0]  ld_oc;
+    reg [ADDR_WIDTH-1:0] oc_w_ptr;
+    reg                  no_more_tiles;
+
+    // ------------------------------------------------------------------
+    // Compute engine FSM (consumer)
+    // ------------------------------------------------------------------
+    localparam [2:0] C_IDLE = 3'd0, C_WAIT = 3'd1, C_GO = 3'd2,
+                     C_RUN  = 3'd3, C_CAP  = 3'd4, C_FIN = 3'd5;
+    reg [2:0]            cstate;
+    reg                  cp_ifb, cp_wb;          // half the compute engine reads
+    reg [DIM_WIDTH-1:0]  cmp_oc;
+    reg [ADDR_WIDTH-1:0] cp_of_ptr;
+    reg                  sh_full;                // shadow holds data not yet stored
+
+    reg [1:0] if_full, w_full;                   // half is loaded and not yet released
+
+    // per-tile metadata, indexed by IFMap half
+    reg [NUM_PE-1:0]     meta_mask [0:1];
+    reg [VR_W-1:0]       meta_vr   [0:1];
+    reg [VC_W-1:0]       meta_vc   [0:1];
+    reg [ADDR_WIDTH-1:0] meta_of   [0:1];
+
+    // ------------------------------------------------------------------
+    // 1. Tile scheduler (now a LOAD pointer: runs ahead of compute)
+    // ------------------------------------------------------------------
     wire                  ts_valid;
     wire [DIM_WIDTH-1:0]  ts_row, ts_col;
     wire [ADDR_WIDTH-1:0] ts_ifmap_origin, ts_ofmap_origin;
     wire [VR_W-1:0]       ts_vrows;
     wire [VC_W-1:0]       ts_vcols;
+    wire [NUM_PE-1:0]     ts_mask;
+    wire                  ts_advance = (lstate == L_LDP_GO);
 
     tile_scheduler #(
         .ADDR_WIDTH(ADDR_WIDTH), .DIM_WIDTH(DIM_WIDTH),
         .PE_ROWS(PE_ROWS), .PE_COLS(PE_COLS)
     ) u_tile (
         .clk(clk), .rst(rst),
-        .start(ts_start), .advance(ts_advance),
+        .start(layer_start), .advance(ts_advance),
         .ofmap_rows(ofmap_rows), .ofmap_cols(ofmap_cols), .stride(stride),
         .ifmap_row_step(ifmap_row_step),
         .ifmap_base_addr(ifmap_base_addr), .ofmap_base_addr(ofmap_base_addr),
         .tile_valid(ts_valid), .tile_row(ts_row), .tile_col(ts_col),
         .ifmap_origin(ts_ifmap_origin), .ofmap_origin(ts_ofmap_origin),
-        .valid_rows(ts_vrows), .valid_cols(ts_vcols), .pe_mask(pe_mask)
+        .valid_rows(ts_vrows), .valid_cols(ts_vcols), .pe_mask(ts_mask)
     );
+
+    // latch tile metadata when its patch load is launched (tile pointer advances on the same edge)
+    always @(posedge clk) begin
+        if (lstate == L_LDP_GO) begin
+            meta_mask[ld_ifb] <= ts_mask;
+            meta_vr  [ld_ifb] <= ts_vrows;
+            meta_vc  [ld_ifb] <= ts_vcols;
+            meta_of  [ld_ifb] <= ts_ofmap_origin;
+        end
+    end
+
+    assign pe_mask = meta_mask[cp_ifb];
 
     // ------------------------------------------------------------------
     // 2. Compute sequencer
     // ------------------------------------------------------------------
-    assign compute_start = (state == S_CMP_GO);
+    assign compute_start = (cstate == C_GO);
 
     wire seq_done_unused;
     compute_sequencer #(
@@ -200,13 +226,14 @@ module address_generator #(
     // ------------------------------------------------------------------
     // 3. Load generator
     // ------------------------------------------------------------------
-    wire ld_start = (state == S_LDP_GO) || (state == S_LDW_GO);
-    wire ld_job_w = (state == S_LDW_GO);
+    wire ld_start = (lstate == L_LDP_GO) || (lstate == L_LDW_GO);
+    wire ld_job_w = (lstate == L_LDW_GO);
     wire ld_busy, ld_done;
     wire [NUM_MACROS-1:0]          ld_req;
     wire [NUM_MACROS*MACRO_AW-1:0] ld_addr;
     wire                           ld_wr_weight;
     wire [NUM_MACROS-1:0]          ld_wr_en;
+    wire [NUM_MACROS-1:0]          ld_grant;
 
     load_generator #(
         .ADDR_WIDTH(ADDR_WIDTH), .DIM_WIDTH(DIM_WIDTH), .RF_AW(RF_AW),
@@ -222,7 +249,7 @@ module address_generator #(
         .weights_per_oc(weights_per_oc),
         .ifmap_origin(ts_ifmap_origin), .weight_src_addr(oc_w_ptr),
         .valid_rows(ts_vrows), .valid_cols(ts_vcols),
-        .nmc_req(ld_req), .nmc_addr(ld_addr), .nmc_grant(nmc_grant),
+        .nmc_req(ld_req), .nmc_addr(ld_addr), .nmc_grant(ld_grant),
         .rf_wr_en(ld_wr_en), .rf_wr_addr(rf_wr_addr), .rf_wr_weight(ld_wr_weight),
         .busy(ld_busy), .done(ld_done)
     );
@@ -231,12 +258,16 @@ module address_generator #(
     assign wrf_wr_en  = ld_wr_en & {NUM_MACROS{ ld_wr_weight}};
 
     // ------------------------------------------------------------------
-    // 4. Store / reload generator
-    //    (reload mode is wired once the loop order becomes configurable)
+    // 4. Store generator (reads the OFMap shadow, not the live accumulators)
     // ------------------------------------------------------------------
-    wire st_start = (state == S_ST_GO);
+    wire cmp_oc_last = (cmp_oc + 1 >= output_channels);
+    wire [ADDR_WIDTH-1:0] st_addr_now = (cmp_oc == 0) ? meta_of[cp_ifb] : cp_of_ptr;
+    wire cap_fire = (cstate == C_CAP) && !sh_full;
+
+    assign st_capture = cap_fire;
+
     wire st_busy, st_done;
-    wire [NUM_MACROS-1:0]          st_req, st_we;
+    wire [NUM_MACROS-1:0]          st_req, st_we, st_grant;
     wire [NUM_MACROS*MACRO_AW-1:0] st_addr;
 
     store_reload_generator #(
@@ -245,80 +276,166 @@ module address_generator #(
         .PE_ROWS(PE_ROWS), .PE_COLS(PE_COLS)
     ) u_store (
         .clk(clk), .rst(rst),
-        .start(st_start), .reload(1'b0),
-        .ofmap_cols(ofmap_cols), .ofmap_tile_addr(oc_of_ptr),
-        .valid_rows(ts_vrows), .valid_cols(ts_vcols),
-        .nmc_req(st_req), .nmc_we(st_we), .nmc_addr(st_addr), .nmc_grant(nmc_grant),
+        .start(cap_fire), .reload(1'b0),
+        .ofmap_cols(ofmap_cols), .ofmap_tile_addr(st_addr_now),
+        .valid_rows(meta_vr[cp_ifb]), .valid_cols(meta_vc[cp_ifb]),
+        .nmc_req(st_req), .nmc_we(st_we), .nmc_addr(st_addr), .nmc_grant(st_grant),
         .st_lane_sel(st_lane_sel),
         .rl_wr_en(), .rl_wr_lane(),
         .busy(st_busy), .done(st_done)
     );
 
     // ------------------------------------------------------------------
-    // NMC port: only one of load / store is ever busy
+    // NMC port arbiter: per macro, store wins over load; loser retries
     // ------------------------------------------------------------------
-    assign nmc_req  = ld_req | st_req;
-    assign nmc_we   = st_busy ? st_we   : {NUM_MACROS{1'b0}};
-    assign nmc_addr = st_busy ? st_addr : ld_addr;
+    assign nmc_req   = ld_req | st_req;
+    assign nmc_we    = st_req & st_we;
+    assign st_grant  = nmc_grant & st_req;
+    assign ld_grant  = nmc_grant & ld_req & ~st_req;
+
+    genvar am;
+    generate for (am = 0; am < NUM_MACROS; am = am + 1) begin : g_arb
+        assign nmc_addr[am*MACRO_AW +: MACRO_AW] = st_req[am] ? st_addr[am*MACRO_AW +: MACRO_AW]
+                                                              : ld_addr[am*MACRO_AW +: MACRO_AW];
+    end endgenerate
 
     // ------------------------------------------------------------------
-    // Flushes
+    // RF half selects / flushes
     // ------------------------------------------------------------------
-    assign ifrf_flush = (state == S_TILE_FLUSH);
-    assign wrf_flush  = (state == S_OC_FLUSH);
+    assign ifrf_flush     = (lstate == L_IF_FLUSH);
+    assign ifrf_flush_sel = ld_ifb;
+    assign ifrf_wr_sel    = ld_ifb;
+    assign ifrf_rd_sel    = cp_ifb;
+    assign wrf_flush      = (lstate == L_W_FLUSH);
+    assign wrf_flush_sel  = ld_wb;
+    assign wrf_wr_sel     = ld_wb;
+    assign wrf_rd_sel     = cp_wb;
+
+    // perf phases (they now OVERLAP, so load+compute+store can exceed total)
+    assign ph_load    = (lstate == L_LDP_GO) || (lstate == L_LDP_WAIT) ||
+                        (lstate == L_LDW_GO) || (lstate == L_LDW_WAIT);
+    assign ph_compute = (cstate == C_GO) || (cstate == C_RUN) || (cstate == C_CAP);
+    assign ph_store   = sh_full;
 
     // ------------------------------------------------------------------
-    // Master FSM
+    // Half occupancy flags
+    // ------------------------------------------------------------------
+    wire if_set = (lstate == L_LDP_WAIT) && ld_done;
+    wire w_set  = (lstate == L_LDW_WAIT) && ld_done;
+    wire if_clr = cap_fire && cmp_oc_last;
+    wire w_clr  = cap_fire;
+
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            if_full <= 2'b00;  w_full <= 2'b00;
+        end else if (layer_start) begin
+            if_full <= 2'b00;  w_full <= 2'b00;
+        end else begin
+            if (if_set) if_full[ld_ifb] <= 1'b1;
+            if (if_clr) if_full[cp_ifb] <= 1'b0;
+            if (w_set)  w_full[ld_wb]   <= 1'b1;
+            if (w_clr)  w_full[cp_wb]   <= 1'b0;
+        end
+    end
+
+    // ------------------------------------------------------------------
+    // Loader FSM
     // ------------------------------------------------------------------
     always @(posedge clk or posedge rst) begin
         if (rst) begin
-            state <= S_IDLE; done <= 1'b0;
-            oc <= 0; oc_w_ptr <= 0; oc_of_ptr <= 0;
+            lstate <= L_IDLE; ld_ifb <= 1'b0; ld_wb <= 1'b0;
+            ld_oc <= 0; oc_w_ptr <= 0; no_more_tiles <= 1'b0;
         end else begin
-            done <= 1'b0;
-            case (state)
-                S_IDLE:       if (start) state <= S_TILE_FLUSH;
-
-                S_TILE_FLUSH: begin
-                    oc        <= 0;
-                    oc_w_ptr  <= weight_base_addr;
-                    oc_of_ptr <= ts_ofmap_origin;
-                    state     <= S_LDP_GO;
+            case (lstate)
+                L_IDLE: if (layer_start) begin
+                    ld_ifb <= 1'b0; ld_wb <= 1'b0; no_more_tiles <= 1'b0;
+                    lstate <= L_WAIT_IF;
                 end
 
-                S_LDP_GO:     state <= S_LDP_WAIT;
-                S_LDP_WAIT:   if (ld_done) state <= S_OC_FLUSH;
+                L_WAIT_IF:  if (!if_full[ld_ifb]) lstate <= L_IF_FLUSH;
+                L_IF_FLUSH: begin
+                    ld_oc    <= 0;
+                    oc_w_ptr <= weight_base_addr;
+                    lstate   <= L_LDP_GO;
+                end
+                L_LDP_GO:   lstate <= L_LDP_WAIT;
+                L_LDP_WAIT: if (ld_done) lstate <= L_WAIT_W;
 
-                S_OC_FLUSH:   state <= S_LDW_GO;
-                S_LDW_GO:     state <= S_LDW_WAIT;
-                S_LDW_WAIT:   if (ld_done) state <= S_CMP_GO;
+                L_WAIT_W:   if (!w_full[ld_wb]) lstate <= L_W_FLUSH;
+                L_W_FLUSH:  lstate <= L_LDW_GO;
+                L_LDW_GO:   lstate <= L_LDW_WAIT;
+                L_LDW_WAIT: if (ld_done) begin
+                    ld_wb  <= ~ld_wb;
+                    lstate <= L_NEXT_OC;
+                end
 
-                S_CMP_GO:     state <= S_CMP_WAIT;
-                S_CMP_WAIT:   if (compute_done) state <= S_ST_GO;
-
-                S_ST_GO:      state <= S_ST_WAIT;
-                S_ST_WAIT:    if (st_done) state <= S_NEXT_OC;
-
-                S_NEXT_OC: begin
-                    if (oc + 1 < output_channels) begin
-                        oc        <= oc + 1'b1;
-                        oc_w_ptr  <= oc_w_ptr  + weights_per_oc;
-                        oc_of_ptr <= oc_of_ptr + ofmap_ch_size;
-                        state     <= S_OC_FLUSH;
+                L_NEXT_OC: begin
+                    if (ld_oc + 1 < output_channels) begin
+                        ld_oc    <= ld_oc + 1'b1;
+                        oc_w_ptr <= oc_w_ptr + weights_per_oc;
+                        lstate   <= L_WAIT_W;
                     end else begin
-                        state     <= S_NEXT_TILE;
+                        ld_ifb <= ~ld_ifb;
+                        lstate <= L_CHECK;
                     end
                 end
 
-                S_NEXT_TILE:  state <= S_CHECK;
-                S_CHECK:      state <= ts_valid ? S_TILE_FLUSH : S_FINISH;
-
-                S_FINISH: begin
-                    done  <= 1'b1;
-                    state <= S_IDLE;
+                L_CHECK: begin
+                    no_more_tiles <= !ts_valid;
+                    lstate        <= ts_valid ? L_WAIT_IF : L_IDLE;
                 end
 
-                default:      state <= S_IDLE;
+                default: lstate <= L_IDLE;
+            endcase
+        end
+    end
+
+    // ------------------------------------------------------------------
+    // Compute engine FSM
+    // ------------------------------------------------------------------
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            cstate <= C_IDLE; cp_ifb <= 1'b0; cp_wb <= 1'b0;
+            cmp_oc <= 0; cp_of_ptr <= 0; sh_full <= 1'b0;
+            done <= 1'b0; layer_busy <= 1'b0;
+        end else begin
+            done <= 1'b0;
+            if (layer_start) layer_busy <= 1'b1;
+
+            if (cap_fire)      sh_full <= 1'b1;
+            else if (st_done)  sh_full <= 1'b0;
+
+            case (cstate)
+                C_IDLE: if (layer_start) begin
+                    cp_ifb <= 1'b0; cp_wb <= 1'b0; cmp_oc <= 0;
+                    cstate <= C_WAIT;
+                end
+
+                C_WAIT: if (if_full[cp_ifb] && w_full[cp_wb]) cstate <= C_GO;
+                C_GO:   cstate <= C_RUN;
+                C_RUN:  if (compute_done) cstate <= C_CAP;
+
+                // accumulators stay put until the shadow is free; capture + store start + release
+                C_CAP: if (!sh_full) begin
+                    cp_of_ptr <= st_addr_now + ofmap_ch_size;
+                    cp_wb     <= ~cp_wb;
+                    if (cmp_oc_last) begin
+                        cmp_oc <= 0;
+                        cp_ifb <= ~cp_ifb;
+                        cstate <= no_more_tiles ? C_FIN : C_WAIT;
+                    end else begin
+                        cmp_oc <= cmp_oc + 1'b1;
+                        cstate <= C_WAIT;
+                    end
+                end
+
+                C_FIN: if (!sh_full) begin
+                    done       <= 1'b1;
+                    layer_busy <= 1'b0;
+                    cstate     <= C_IDLE;
+                end
+
+                default: cstate <= C_IDLE;
             endcase
         end
     end

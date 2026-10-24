@@ -108,7 +108,7 @@ module address_generator_tb;
     reg signed [31:0] exp_v;
     reg [31:0] rd;
 
-    always @(posedge clk) if (start || dut.u_ag.state != 0) begin
+        always @(posedge clk) if (start || dut.u_ag.layer_busy) begin
         if (ac_stall) stall_cycles = stall_cycles + 1;
     end
 

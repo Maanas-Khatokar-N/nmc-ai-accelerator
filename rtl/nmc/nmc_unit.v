@@ -81,7 +81,9 @@ module nmc_unit #(
     wire [NUM_PE*RF_AW-1:0] ifmap_rf_addr;
     wire [RF_AW-1:0]        weight_rf_addr;
     wire [NUM_PE-1:0]       pe_mask;
-    wire                    ifrf_flush, wrf_flush;
+    wire ifrf_flush, ifrf_flush_sel, ifrf_wr_sel, ifrf_rd_sel;
+    wire wrf_flush,  wrf_flush_sel,  wrf_wr_sel,  wrf_rd_sel;
+    wire st_capture;
     wire [NUM_MACROS-1:0]   ifrf_wr_en, wrf_wr_en;
     wire [NUM_MACROS*RF_AW-1:0] rf_wr_addr;
     wire [NUM_MACROS*LANE_W-1:0] st_lane_sel;
@@ -102,7 +104,11 @@ module nmc_unit #(
         .compute_start(compute_start), .compute_done(compute_done),
         .seq_enable(seq_enable), .seq_valid(seq_valid), .seq_last(seq_last),
         .ifmap_rf_addr(ifmap_rf_addr), .weight_rf_addr(weight_rf_addr), .pe_mask(pe_mask),
-        .ifrf_flush(ifrf_flush), .wrf_flush(wrf_flush),
+        .ifrf_flush(ifrf_flush), .ifrf_flush_sel(ifrf_flush_sel),
+        .ifrf_wr_sel(ifrf_wr_sel), .ifrf_rd_sel(ifrf_rd_sel),
+        .wrf_flush(wrf_flush), .wrf_flush_sel(wrf_flush_sel),
+        .wrf_wr_sel(wrf_wr_sel), .wrf_rd_sel(wrf_rd_sel),
+        .st_capture(st_capture),
         .ifrf_wr_en(ifrf_wr_en), .wrf_wr_en(wrf_wr_en), .rf_wr_addr(rf_wr_addr),
         .nmc_req(nmc_req), .nmc_we(nmc_we), .nmc_addr(nmc_addr), .nmc_grant(nmc_grant),
         .st_lane_sel(st_lane_sel),
@@ -124,16 +130,18 @@ module nmc_unit #(
     wire [DATA_WIDTH-1:0]            w_rd;
     wire [0:0]                       w_rv;
 
-    register_file #(.DATA_WIDTH(DATA_WIDTH), .DEPTH(1<<RF_AW),
-                    .NUM_READ_PORTS(NUM_PE), .NUM_WRITE_PORTS(NUM_MACROS)) u_ifrf (
-        .clk(clk), .rst(rst), .flush(ifrf_flush),
+    register_file_pp #(.DATA_WIDTH(DATA_WIDTH), .DEPTH(1<<RF_AW),
+                       .NUM_READ_PORTS(NUM_PE), .NUM_WRITE_PORTS(NUM_MACROS)) u_ifrf (
+        .clk(clk), .rst(rst), .flush(ifrf_flush), .flush_sel(ifrf_flush_sel),
+        .wr_sel(ifrf_wr_sel), .rd_sel(ifrf_rd_sel),
         .write_en(ifrf_wr_en), .write_addr(rf_wr_addr), .write_data(rf_wdata), .write_blocked(if_blk),
         .read_en(ifrf_read_en), .read_last({NUM_PE{1'b0}}),
         .read_addr(ifmap_rf_addr), .read_data(if_rd), .read_valid(if_rv));
 
-    register_file #(.DATA_WIDTH(DATA_WIDTH), .DEPTH(1<<RF_AW),
-                    .NUM_READ_PORTS(1), .NUM_WRITE_PORTS(NUM_MACROS)) u_wrf (
-        .clk(clk), .rst(rst), .flush(wrf_flush),
+    register_file_pp #(.DATA_WIDTH(DATA_WIDTH), .DEPTH(1<<RF_AW),
+                       .NUM_READ_PORTS(1), .NUM_WRITE_PORTS(NUM_MACROS)) u_wrf (
+        .clk(clk), .rst(rst), .flush(wrf_flush), .flush_sel(wrf_flush_sel),
+        .wr_sel(wrf_wr_sel), .rd_sel(wrf_rd_sel),
         .write_en(wrf_wr_en), .write_addr(rf_wr_addr), .write_data(rf_wdata), .write_blocked(w_blk),
         .read_en(wrf_read_en), .read_last(1'b0),
         .read_addr(weight_rf_addr), .read_data(w_rd), .read_valid(w_rv));
@@ -170,9 +178,13 @@ module nmc_unit #(
         .cyc_mem_blocked(perf_cyc_mem_blocked), .mac_ops(perf_mac_ops));
 
     // ---------------- store data mux ----------------
+    // OFMap shadow: results are copied out of the PEs at capture, so the PEs can start the next oc
+    reg [NUM_PE*ACC_WIDTH-1:0] acc_shadow;
+    always @(posedge clk) if (st_capture) acc_shadow <= acc_out;
+
     generate for (gi = 0; gi < NUM_MACROS; gi = gi + 1) begin : g_st
         wire [LANE_W-1:0] sel = st_lane_sel[gi*LANE_W +: LANE_W];
-        assign nmc_wdata[gi*32 +: 32] = acc_out[sel*ACC_WIDTH +: ACC_WIDTH];
+        assign nmc_wdata[gi*32 +: 32] = acc_shadow[sel*ACC_WIDTH +: ACC_WIDTH];
     end endgenerate
 
     // ---------------- debug ----------------
