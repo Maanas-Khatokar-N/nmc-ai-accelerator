@@ -20,6 +20,9 @@ module register_file_tb #(
     wire [DATA_WIDTH*NUM_READ_PORTS-1:0]  read_data;
     wire [NUM_READ_PORTS-1:0]             read_valid;
 
+    reg  [ADDR_WIDTH*NUM_WRITE_PORTS-1:0] chk_addr;
+    wire [NUM_WRITE_PORTS-1:0]            chk_free;
+
     register_file #(
         .DATA_WIDTH(DATA_WIDTH), .DEPTH(DEPTH),
         .NUM_READ_PORTS(NUM_READ_PORTS), .NUM_WRITE_PORTS(NUM_WRITE_PORTS),
@@ -29,7 +32,8 @@ module register_file_tb #(
         .write_en(write_en), .write_addr(write_addr), .write_data(write_data),
         .write_blocked(write_blocked),
         .read_en(read_en), .read_last(read_last), .read_addr(read_addr),
-        .read_data(read_data), .read_valid(read_valid)
+        .read_data(read_data), .read_valid(read_valid),
+        .chk_addr(chk_addr), .chk_free(chk_free)
     );
 
     always #5 clk = ~clk;
@@ -81,6 +85,12 @@ module register_file_tb #(
         check("after write: DV[3]", dv(3), 2'b01);
         check("after write: read_valid", read_valid, 16'hFFFF);
         check("after write: data port 2", read_data[2*DATA_WIDTH +: DATA_WIDTH], 30);
+
+
+        for (i = 0; i < NUM_WRITE_PORTS; i = i + 1) chk_addr[i*ADDR_WIDTH +: ADDR_WIDTH] = i;       // live words
+        #1; check("chk live -> not free", chk_free, 0);
+        for (i = 0; i < NUM_WRITE_PORTS; i = i + 1) chk_addr[i*ADDR_WIDTH +: ADDR_WIDTH] = 100 + i; // empty words
+        #1; check("chk empty -> free", chk_free, 16'hFFFF);
 
         // ---------- read, not last: 01 -> 11 ----------
         read_en = {NUM_READ_PORTS{1'b1}};

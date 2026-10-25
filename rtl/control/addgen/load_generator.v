@@ -66,6 +66,10 @@ module load_generator #(
     output wire [NUM_MACROS*RF_AW-1:0]       rf_wr_addr,
     output wire                              rf_wr_weight,    // 1: weight RF, 0: IFMap RF
 
+    // request-time view of the destination (combinational, same cycle as nmc_req)
+    output wire [NUM_MACROS*RF_AW-1:0]       rf_req_addr,     // RF word lane m WILL write
+    output wire                              rf_req_weight,   // 1: weight RF, 0: IFMap RF
+
     output reg                               busy,
     output reg                               done
 );
@@ -168,6 +172,12 @@ module load_generator #(
     assign rf_wr_en     = wr_en_q;
     assign rf_wr_addr   = wr_addr_q;
     assign rf_wr_weight = wr_w_q;
+
+    genvar gr;
+    generate for (gr = 0; gr < NUM_MACROS; gr = gr + 1) begin : gen_req_dst
+        assign rf_req_addr[gr*RF_AW +: RF_AW] = dst0 + gr;
+    end endgenerate
+    assign rf_req_weight = job_w;
 
     always @(posedge clk or posedge rst) begin
         if (rst) begin

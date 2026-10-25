@@ -113,11 +113,17 @@ module address_generator #(
     // ---------------- OFMap shadow ----------------
     output wire                        st_capture,   // acc_out -> shadow register (datapath)
 
-    // ---------------- NMC memory port ----------------
-    output wire [NUM_MACROS-1:0]          nmc_req,
-    output wire [NUM_MACROS-1:0]          nmc_we,
-    output wire [NUM_MACROS*MACRO_AW-1:0] nmc_addr,
-    input  wire [NUM_MACROS-1:0]          nmc_grant,
+    // ---------------- memory requests (to / from the access controller) ----------------
+    output wire [NUM_MACROS-1:0]          ld_req,
+    output wire [NUM_MACROS*MACRO_AW-1:0] ld_addr,
+    output wire [NUM_MACROS*RF_AW-1:0]    ld_dst_addr,
+    output wire                           ld_is_weight,
+    input  wire [NUM_MACROS-1:0]          ld_grant,
+
+    output wire [NUM_MACROS-1:0]          st_req,
+    output wire [NUM_MACROS-1:0]          st_we,
+    output wire [NUM_MACROS*MACRO_AW-1:0] st_addr,
+    input  wire [NUM_MACROS-1:0]          st_grant,
     output wire [NUM_MACROS*LANE_W-1:0]   st_lane_sel,
 
     output wire                           ph_load,
@@ -229,11 +235,8 @@ module address_generator #(
     wire ld_start = (lstate == L_LDP_GO) || (lstate == L_LDW_GO);
     wire ld_job_w = (lstate == L_LDW_GO);
     wire ld_busy, ld_done;
-    wire [NUM_MACROS-1:0]          ld_req;
-    wire [NUM_MACROS*MACRO_AW-1:0] ld_addr;
     wire                           ld_wr_weight;
     wire [NUM_MACROS-1:0]          ld_wr_en;
-    wire [NUM_MACROS-1:0]          ld_grant;
 
     load_generator #(
         .ADDR_WIDTH(ADDR_WIDTH), .DIM_WIDTH(DIM_WIDTH), .RF_AW(RF_AW),
@@ -251,6 +254,7 @@ module address_generator #(
         .valid_rows(ts_vrows), .valid_cols(ts_vcols),
         .nmc_req(ld_req), .nmc_addr(ld_addr), .nmc_grant(ld_grant),
         .rf_wr_en(ld_wr_en), .rf_wr_addr(rf_wr_addr), .rf_wr_weight(ld_wr_weight),
+        .rf_req_addr(ld_dst_addr), .rf_req_weight(ld_is_weight),
         .busy(ld_busy), .done(ld_done)
     );
 
@@ -267,8 +271,7 @@ module address_generator #(
     assign st_capture = cap_fire;
 
     wire st_busy, st_done;
-    wire [NUM_MACROS-1:0]          st_req, st_we, st_grant;
-    wire [NUM_MACROS*MACRO_AW-1:0] st_addr;
+
 
     store_reload_generator #(
         .ADDR_WIDTH(ADDR_WIDTH), .DIM_WIDTH(DIM_WIDTH),
@@ -285,19 +288,7 @@ module address_generator #(
         .busy(st_busy), .done(st_done)
     );
 
-    // ------------------------------------------------------------------
-    // NMC port arbiter: per macro, store wins over load; loser retries
-    // ------------------------------------------------------------------
-    assign nmc_req   = ld_req | st_req;
-    assign nmc_we    = st_req & st_we;
-    assign st_grant  = nmc_grant & st_req;
-    assign ld_grant  = nmc_grant & ld_req & ~st_req;
 
-    genvar am;
-    generate for (am = 0; am < NUM_MACROS; am = am + 1) begin : g_arb
-        assign nmc_addr[am*MACRO_AW +: MACRO_AW] = st_req[am] ? st_addr[am*MACRO_AW +: MACRO_AW]
-                                                              : ld_addr[am*MACRO_AW +: MACRO_AW];
-    end endgenerate
 
     // ------------------------------------------------------------------
     // RF half selects / flushes

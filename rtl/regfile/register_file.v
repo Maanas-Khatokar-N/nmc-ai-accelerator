@@ -51,6 +51,10 @@ module register_file #(
     input  [DATA_WIDTH*NUM_WRITE_PORTS-1:0] write_data,
     output reg [NUM_WRITE_PORTS-1:0]        write_blocked, // write rejected (word still live)
 
+    // Pre-check: "would a write to this address be accepted?"  (V = 0)
+    input  [ADDR_WIDTH*NUM_WRITE_PORTS-1:0] chk_addr,
+    output reg [NUM_WRITE_PORTS-1:0]        chk_free,
+
     // Read ports
     input  [NUM_READ_PORTS-1:0]             read_en,   // this read consumes a use
     input  [NUM_READ_PORTS-1:0]             read_last, // this read is the final use
@@ -70,7 +74,7 @@ module register_file #(
     // Combinational read (masked by V) and write-block detection
     // ------------------------------------------------------------------
     integer r, w;
-    reg [ADDR_WIDTH-1:0] ra, wa;
+    reg [ADDR_WIDTH-1:0] ra, wa, ca;
 
     always @(*) begin
         for (r = 0; r < NUM_READ_PORTS; r = r + 1) begin
@@ -83,6 +87,11 @@ module register_file #(
         for (w = 0; w < NUM_WRITE_PORTS; w = w + 1) begin
             wa = write_addr[w*ADDR_WIDTH +: ADDR_WIDTH];
             write_blocked[w] = write_en[w] && (ENFORCE_REPLACE != 0) && v_bit[wa];
+        end
+
+        for (w = 0; w < NUM_WRITE_PORTS; w = w + 1) begin
+            ca = chk_addr[w*ADDR_WIDTH +: ADDR_WIDTH];
+            chk_free[w] = ~v_bit[ca];
         end
     end
 
