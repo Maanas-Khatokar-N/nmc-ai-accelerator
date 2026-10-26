@@ -1,19 +1,31 @@
 // ============================================================================
 // Address generator
 //
-// Wrapper around four generators that share ONE layer descriptor:
+// Wrapper around generators that share ONE layer descriptor:
 //   1. tile_scheduler            output tile coordinates, PE valid mask
 //   2. compute_sequencer         kernel row/col/channel loop -> weight index + 16 IFMap RF read addresses
 //   3. load_generator            memory macros -> IFMap RF / weight RF
-//   4. store_reload_generator    PE accumulators <-> OFMap macros
+//   4. store_reload_generator    PE accumulators -> OFMap macros          (store, u_store)
+//   5. store_reload_generator    OFMap macros -> psum RF                  (reload, u_reload)
 //
 //
 //   for each output tile:
 //       flush IFMap RF; load IFMap patch                 (reused by all output channels)
 //       for each output channel:
-//           flush weight RF; load its weights
-//           compute (all input channels reduced in the PE)
+//           flush weight RF + psum RF half; load its weights
+//           if accumulate: reload the OFMap tile of this channel into the psum RF
+//           compute (all input channels of THIS Cin group reduced in the PE)
+//             (accumulate: psum_load into the PEs first, then MACs continue from it)
 //           store the 16 accumulators to the OFMap
+//
+// ---------------------------------------------------------------------------
+// Cin splitting (software): when Cin does not fit the RFs, software runs the
+// layer once per Cin group. Group 0 runs with accumulate = 0 (plain store).
+// Groups 1.. run with accumulate = 1: the previous partial OFMap is reloaded
+// and the group's MACs are added on top. Per group, software points
+// ifmap_base_addr at the group's first channel, repacks weights as
+// [oc][ic_in_group][kr][kc] and sets input_channels / weights_per_oc for the group.
+// A run must finish (done) before the next group starts.
 //
 // ---------------------------------------------------------------------------
 // Layer descriptor.  Fields marked (sw) are precomputed by software / at
@@ -30,6 +42,7 @@
 //   rf_row_step     (sw) stride * patch_cols
 //   rf_ch_stride    (sw) patch_rows * patch_cols,  patch_rows = (PE_ROWS-1)*stride + kernel_rows
 //   weights_per_oc  (sw) input_channels * kernel_rows * kernel_cols
+//   accumulate           1: reload psums from the OFMap before the MACs (Cin groups 1..)
 //
 // Limits to respect when tiling (software):
 //   input_channels * rf_ch_stride <= IFMap RF depth (256)
@@ -45,11 +58,19 @@
 //   compute_done (in): all MACs of this output channel are accumulated and
 //        acc_out is final (the access controller delays this by its own
 //        pipeline depth + 1 cycle for the accumulator register).
+//   psum_req (out) / psum_ack (in): accumulate mode only. psum_req rises with
+//        compute_start and stays until the access controller has loaded the
+//        psums into the PEs (it waits out the pe_clear cycle itself).
 //   pe_mask (out): valid PEs of the current tile.
-//   ifrf_flush / wrf_flush (out): clear the D/V bits of the IFMap / weight RF.
+//   ifrf_flush / wrf_flush (out): clear the D/V bits of the IFMap / weight RF
+//        (wrf_flush / selects are also used for the psum RF: it ping-pongs with the weights).
 //   ifrf_wr_en / wrf_wr_en / rf_wr_addr (out): RF write side; write_data lane m
 //        = nmc_rdata[lane m][7:0] (same for both RFs).
-//   nmc_*: NMC memory-port requests (load or store, never both at once);
+//   psrf_wr_en / psrf_wr_addr (out): psum RF write side; write_data lane m
+//        = nmc_rdata[lane m][31:0], word address = PE lane.
+//   psrf_chk_addr (out): request-time PE lane of each macro (psum RF free check).
+//   ld_is_psum (out): the load channel currently carries a psum reload.
+//   nmc_*: NMC memory-port requests (load/reload or store);
 //        st_lane_sel[m] selects which accumulator drives nmc_wdata[m].
 // ============================================================================
 module address_generator #(
@@ -86,6 +107,7 @@ module address_generator #(
     input  wire [ADDR_WIDTH-1:0] ifmap_base_addr,
     input  wire [ADDR_WIDTH-1:0] weight_base_addr,
     input  wire [ADDR_WIDTH-1:0] ofmap_base_addr,
+    input  wire                  accumulate,       // 1: reload psums from OFMap before MACs
 
     // ---------------- compute side (to access controller) ----------------
     output wire                    compute_start,
@@ -96,6 +118,8 @@ module address_generator #(
     output wire [NUM_PE*RF_AW-1:0] ifmap_rf_addr,
     output wire [RF_AW-1:0]        weight_rf_addr,
     output wire [NUM_PE-1:0]       pe_mask,          // mask of the tile being COMPUTED
+    output wire                    psum_req,
+    input  wire                    psum_ack,
 
     // ---------------- register files (ping-pong) ----------------
     output wire                        ifrf_flush,
@@ -110,14 +134,20 @@ module address_generator #(
     output wire [NUM_MACROS-1:0]       wrf_wr_en,
     output wire [NUM_MACROS*RF_AW-1:0] rf_wr_addr,
 
+    // ---------------- psum RF write side (reload) ----------------
+    output wire [NUM_MACROS-1:0]        psrf_wr_en,
+    output wire [NUM_MACROS*LANE_W-1:0] psrf_wr_addr,
+    output wire [NUM_MACROS*LANE_W-1:0] psrf_chk_addr,
+
     // ---------------- OFMap shadow ----------------
     output wire                        st_capture,   // acc_out -> shadow register (datapath)
 
     // ---------------- memory requests (to / from the access controller) ----------------
-    output wire [NUM_MACROS-1:0]          ld_req,
+    output wire [NUM_MACROS-1:0]          ld_req,        // load OR psum reload (never both)
     output wire [NUM_MACROS*MACRO_AW-1:0] ld_addr,
     output wire [NUM_MACROS*RF_AW-1:0]    ld_dst_addr,
     output wire                           ld_is_weight,
+    output wire                           ld_is_psum,
     input  wire [NUM_MACROS-1:0]          ld_grant,
 
     output wire [NUM_MACROS-1:0]          st_req,
@@ -141,16 +171,18 @@ module address_generator #(
 
     // ------------------------------------------------------------------
     // Loader FSM (producer): [flush half, load patch] per tile,
-    //                        [flush half, load weights] per output channel
+    //                        [flush half, load weights, (reload psums)] per output channel
     // ------------------------------------------------------------------
     localparam [3:0] L_IDLE     = 4'd0,  L_WAIT_IF  = 4'd1,  L_IF_FLUSH = 4'd2,
                      L_LDP_GO   = 4'd3,  L_LDP_WAIT = 4'd4,  L_WAIT_W   = 4'd5,
                      L_W_FLUSH  = 4'd6,  L_LDW_GO   = 4'd7,  L_LDW_WAIT = 4'd8,
-                     L_NEXT_OC  = 4'd9,  L_CHECK    = 4'd10;
+                     L_NEXT_OC  = 4'd9,  L_CHECK    = 4'd10,
+                     L_LDS_GO   = 4'd11, L_LDS_WAIT = 4'd12;
     reg [3:0]            lstate;
     reg                  ld_ifb, ld_wb;          // half the loader is filling
     reg [DIM_WIDTH-1:0]  ld_oc;
     reg [ADDR_WIDTH-1:0] oc_w_ptr;
+    reg [ADDR_WIDTH-1:0] ld_of_ptr;              // OFMap word address of the loader's (tile, oc), oc > 0
     reg                  no_more_tiles;
 
     // ------------------------------------------------------------------
@@ -163,8 +195,10 @@ module address_generator #(
     reg [DIM_WIDTH-1:0]  cmp_oc;
     reg [ADDR_WIDTH-1:0] cp_of_ptr;
     reg                  sh_full;                // shadow holds data not yet stored
+    reg                  psum_pend;              // accumulate: psums not yet loaded into the PEs
 
     reg [1:0] if_full, w_full;                   // half is loaded and not yet released
+                                                 // (w_full: weights AND psums in accumulate mode)
 
     // per-tile metadata, indexed by IFMap half
     reg [NUM_PE-1:0]     meta_mask [0:1];
@@ -229,6 +263,8 @@ module address_generator #(
         .valid(seq_valid), .last(seq_last), .done(seq_done_unused)
     );
 
+    assign psum_req = psum_pend;
+
     // ------------------------------------------------------------------
     // 3. Load generator
     // ------------------------------------------------------------------
@@ -237,6 +273,8 @@ module address_generator #(
     wire ld_busy, ld_done;
     wire                           ld_wr_weight;
     wire [NUM_MACROS-1:0]          ld_wr_en;
+    wire [NUM_MACROS-1:0]          ldg_req;
+    wire [NUM_MACROS*MACRO_AW-1:0] ldg_addr;
 
     load_generator #(
         .ADDR_WIDTH(ADDR_WIDTH), .DIM_WIDTH(DIM_WIDTH), .RF_AW(RF_AW),
@@ -252,7 +290,7 @@ module address_generator #(
         .weights_per_oc(weights_per_oc),
         .ifmap_origin(ts_ifmap_origin), .weight_src_addr(oc_w_ptr),
         .valid_rows(ts_vrows), .valid_cols(ts_vcols),
-        .nmc_req(ld_req), .nmc_addr(ld_addr), .nmc_grant(ld_grant),
+        .nmc_req(ldg_req), .nmc_addr(ldg_addr), .nmc_grant(ld_grant),
         .rf_wr_en(ld_wr_en), .rf_wr_addr(rf_wr_addr), .rf_wr_weight(ld_wr_weight),
         .rf_req_addr(ld_dst_addr), .rf_req_weight(ld_is_weight),
         .busy(ld_busy), .done(ld_done)
@@ -260,6 +298,36 @@ module address_generator #(
 
     assign ifrf_wr_en = ld_wr_en & {NUM_MACROS{~ld_wr_weight}};
     assign wrf_wr_en  = ld_wr_en & {NUM_MACROS{ ld_wr_weight}};
+
+    // ------------------------------------------------------------------
+    // 3b. Psum reload generator: OFMap macros -> psum RF (same load channel)
+    //     Uses the loader's own tile (meta_*[ld_ifb]) and output channel pointer.
+    // ------------------------------------------------------------------
+    wire [NUM_MACROS-1:0]          rl_req;
+    wire [NUM_MACROS*MACRO_AW-1:0] rl_addr;
+    wire                           rl_busy, rl_done;
+    wire [ADDR_WIDTH-1:0] rl_addr_now = (ld_oc == 0) ? meta_of[ld_ifb] : ld_of_ptr;
+    wire                  rl_start    = (lstate == L_LDS_GO);
+
+    store_reload_generator #(
+        .ADDR_WIDTH(ADDR_WIDTH), .DIM_WIDTH(DIM_WIDTH),
+        .NUM_MACROS(NUM_MACROS), .MACRO_AW(MACRO_AW),
+        .PE_ROWS(PE_ROWS), .PE_COLS(PE_COLS)
+    ) u_reload (
+        .clk(clk), .rst(rst),
+        .start(rl_start), .reload(1'b1),
+        .ofmap_cols(ofmap_cols), .ofmap_tile_addr(rl_addr_now),
+        .valid_rows(meta_vr[ld_ifb]), .valid_cols(meta_vc[ld_ifb]),
+        .nmc_req(rl_req), .nmc_we(), .nmc_addr(rl_addr), .nmc_grant(ld_grant),
+        .st_lane_sel(psrf_chk_addr),
+        .rl_wr_en(psrf_wr_en), .rl_wr_lane(psrf_wr_addr),
+        .busy(rl_busy), .done(rl_done)
+    );
+
+    // load and reload never run together (one loader FSM): merge onto one channel
+    assign ld_req     = ldg_req | rl_req;
+    assign ld_addr    = rl_busy ? rl_addr : ldg_addr;
+    assign ld_is_psum = rl_busy;
 
     // ------------------------------------------------------------------
     // 4. Store generator (reads the OFMap shadow, not the live accumulators)
@@ -291,7 +359,7 @@ module address_generator #(
 
 
     // ------------------------------------------------------------------
-    // RF half selects / flushes
+    // RF half selects / flushes (the psum RF shares the weight RF's selects)
     // ------------------------------------------------------------------
     assign ifrf_flush     = (lstate == L_IF_FLUSH);
     assign ifrf_flush_sel = ld_ifb;
@@ -304,7 +372,8 @@ module address_generator #(
 
     // perf phases (they now OVERLAP, so load+compute+store can exceed total)
     assign ph_load    = (lstate == L_LDP_GO) || (lstate == L_LDP_WAIT) ||
-                        (lstate == L_LDW_GO) || (lstate == L_LDW_WAIT);
+                        (lstate == L_LDW_GO) || (lstate == L_LDW_WAIT) ||
+                        (lstate == L_LDS_GO) || (lstate == L_LDS_WAIT);
     assign ph_compute = (cstate == C_GO) || (cstate == C_RUN) || (cstate == C_CAP);
     assign ph_store   = sh_full;
 
@@ -312,7 +381,9 @@ module address_generator #(
     // Half occupancy flags
     // ------------------------------------------------------------------
     wire if_set = (lstate == L_LDP_WAIT) && ld_done;
-    wire w_set  = (lstate == L_LDW_WAIT) && ld_done;
+    // a weight half is complete when the weights (and, if accumulating, the psums) are in
+    wire w_set  = accumulate ? ((lstate == L_LDS_WAIT) && rl_done)
+                             : ((lstate == L_LDW_WAIT) && ld_done);
     wire if_clr = cap_fire && cmp_oc_last;
     wire w_clr  = cap_fire;
 
@@ -335,7 +406,7 @@ module address_generator #(
     always @(posedge clk or posedge rst) begin
         if (rst) begin
             lstate <= L_IDLE; ld_ifb <= 1'b0; ld_wb <= 1'b0;
-            ld_oc <= 0; oc_w_ptr <= 0; no_more_tiles <= 1'b0;
+            ld_oc <= 0; oc_w_ptr <= 0; ld_of_ptr <= 0; no_more_tiles <= 1'b0;
         end else begin
             case (lstate)
                 L_IDLE: if (layer_start) begin
@@ -356,15 +427,26 @@ module address_generator #(
                 L_W_FLUSH:  lstate <= L_LDW_GO;
                 L_LDW_GO:   lstate <= L_LDW_WAIT;
                 L_LDW_WAIT: if (ld_done) begin
+                    if (accumulate) lstate <= L_LDS_GO;      // weights in, now the psums
+                    else begin
+                        ld_wb  <= ~ld_wb;
+                        lstate <= L_NEXT_OC;
+                    end
+                end
+
+                // psum reload for (tile, oc) into the psum RF half that was flushed with the weights
+                L_LDS_GO:   lstate <= L_LDS_WAIT;
+                L_LDS_WAIT: if (rl_done) begin
                     ld_wb  <= ~ld_wb;
                     lstate <= L_NEXT_OC;
                 end
 
                 L_NEXT_OC: begin
                     if (ld_oc + 1 < output_channels) begin
-                        ld_oc    <= ld_oc + 1'b1;
-                        oc_w_ptr <= oc_w_ptr + weights_per_oc;
-                        lstate   <= L_WAIT_W;
+                        ld_oc     <= ld_oc + 1'b1;
+                        oc_w_ptr  <= oc_w_ptr + weights_per_oc;
+                        ld_of_ptr <= rl_addr_now + ofmap_ch_size;
+                        lstate    <= L_WAIT_W;
                     end else begin
                         ld_ifb <= ~ld_ifb;
                         lstate <= L_CHECK;
@@ -388,13 +470,18 @@ module address_generator #(
         if (rst) begin
             cstate <= C_IDLE; cp_ifb <= 1'b0; cp_wb <= 1'b0;
             cmp_oc <= 0; cp_of_ptr <= 0; sh_full <= 1'b0;
-            done <= 1'b0; layer_busy <= 1'b0;
+            done <= 1'b0; layer_busy <= 1'b0; psum_pend <= 1'b0;
         end else begin
             done <= 1'b0;
             if (layer_start) layer_busy <= 1'b1;
 
             if (cap_fire)      sh_full <= 1'b1;
             else if (st_done)  sh_full <= 1'b0;
+
+            // accumulate: request the psum load right after compute_start
+            // (the access controller holds it off during the pe_clear cycle)
+            if (cstate == C_GO && accumulate) psum_pend <= 1'b1;
+            else if (psum_ack)                psum_pend <= 1'b0;
 
             case (cstate)
                 C_IDLE: if (layer_start) begin

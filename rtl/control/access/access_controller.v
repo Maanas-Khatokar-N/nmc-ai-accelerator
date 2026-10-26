@@ -82,7 +82,10 @@ module access_controller #(
     output wire              mem_access_allowed,
     output wire              mem_blocked_cfg,
     output wire              mem_blocked_core,
-    output wire              ld_blocked_busy
+    output wire              ld_blocked_busy,
+
+    input  wire                           ld_is_psum,     // load channel is a psum reload
+    input  wire [NUM_MACROS-1:0]          psrf_dst_free  // V=0 at the lane's psum RF word
 );
 
     // ------------------------------------------------------------------
@@ -93,7 +96,10 @@ module access_controller #(
     wire w_ok    = wrf_read_valid;
 
     wire mac_fire  = seq_valid & if_ok & w_ok & ~psum_req;
-    wire psum_fire = psum_req & ps_ok;
+    wire psum_fire = psum_req & ps_ok & ~pe_clear;   // clear wins that cycle, so wait one cycle
+
+    wire [NUM_MACROS-1:0] ld_free = ld_is_psum    ? psrf_dst_free :
+                                    ld_is_weight  ? wrf_dst_free  : ifrf_dst_free;
 
     assign pe_mac_en      = mac_fire;
     assign seq_enable     = mac_fire;
@@ -151,7 +157,6 @@ module access_controller #(
     // LOAD / STORE grants and the per-macro arbiter
     // ------------------------------------------------------------------
     wire [NUM_MACROS-1:0] win_vec   = {NUM_MACROS{win_open}};
-    wire [NUM_MACROS-1:0] ld_free   = ld_is_weight ? wrf_dst_free : ifrf_dst_free;
 
     wire [NUM_MACROS-1:0] ld_req_ok = ld_req & ld_free & win_vec;   // word free + window open
     wire [NUM_MACROS-1:0] st_req_ok = st_req & win_vec;             // window open

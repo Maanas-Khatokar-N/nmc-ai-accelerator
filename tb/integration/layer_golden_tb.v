@@ -1,12 +1,10 @@
 `timescale 1ns/1ps
-// ============================================================================
 // Whole-layer testbench driven by scripts/layer_golden.py
-//   reads  sim/data/ifmap.hex, weights.hex   (one 32-bit word per element)
-//   runs   nmc_unit + sram_bank, optional core-port noise
-//   writes sim/data/ofmap_rtl.hex            (OFMap words + 16 guard words)
-// Layer shape comes from plusargs: +IFR +IFC +KR +KC +CIN +COUT +S +NOISE
-// Add +VCD to dump a waveform (large for big layers).
-// ============================================================================
+//   reads  sim/data/ifmap.hex, weights.hex  (weights are packed GROUP-MAJOR:
+//          [group][oc][ic_in_group][kr][kc], see layer_golden.py)
+//   runs   one nmc_unit run per Cin group; group 0 stores, groups 1.. accumulate
+//   writes sim/data/ofmap_rtl.hex           (OFMap words + 16 guard words)
+// Plusargs: +IFR +IFC +KR +KC +CIN +COUT +S +NOISE +CG (Cin group size) [+VCD]
 module layer_golden_tb;
 
     localparam ADDR_WIDTH = 17;
@@ -25,11 +23,12 @@ module layer_golden_tb;
     reg clk = 0, rst = 1;
     always #5 clk = ~clk;
 
-    reg start = 0;
+    reg start = 0, accumulate = 0;
     wire done;
     reg [DIM_WIDTH-1:0]  d_ifmap_cols = 0, d_kr = 0, d_kc = 0, d_cin = 0, d_cout = 0, d_stride = 1;
     reg [DIM_WIDTH-1:0]  d_ofr = 0, d_ofc = 0, d_wpo = 0;
     reg [ADDR_WIDTH-1:0] d_if_ch = 0, d_of_ch = 0, d_if_rstep = 0;
+    reg [ADDR_WIDTH-1:0] d_if_base = 0, d_w_base = 0;
     reg [RF_AW-1:0]      d_rf_rstep = 0, d_rf_ch = 0;
 
     wire [NM-1:0]       nmc_req, nmc_we, nmc_grant, nmc_blocked, nmc_rvalid;
@@ -40,14 +39,14 @@ module layer_golden_tb;
 
     nmc_unit #(.ADDR_WIDTH(ADDR_WIDTH), .DIM_WIDTH(DIM_WIDTH), .RF_AW(RF_AW),
                .NUM_MACROS(NM), .MACRO_AW(MAW)) dut (
-        .clk(clk), .rst(rst), .start(start), .done(done),
+        .clk(clk), .rst(rst), .start(start), .done(done), .accumulate(accumulate),
         .ifmap_cols(d_ifmap_cols), .kernel_rows(d_kr), .kernel_cols(d_kc),
         .input_channels(d_cin), .output_channels(d_cout), .stride(d_stride),
         .ofmap_rows(d_ofr), .ofmap_cols(d_ofc),
         .ifmap_ch_size(d_if_ch), .ofmap_ch_size(d_of_ch), .ifmap_row_step(d_if_rstep),
         .rf_row_step(d_rf_rstep), .rf_ch_stride(d_rf_ch), .weights_per_oc(d_wpo),
-        .ifmap_base_addr(IFM_BASE[ADDR_WIDTH-1:0]),
-        .weight_base_addr(W_BASE[ADDR_WIDTH-1:0]),
+        .ifmap_base_addr(d_if_base),
+        .weight_base_addr(d_w_base),
         .ofmap_base_addr(OFM_BASE[ADDR_WIDTH-1:0]),
         .nmc_req(nmc_req), .nmc_we(nmc_we), .nmc_addr(nmc_addr), .nmc_wdata(nmc_wdata),
         .nmc_grant(nmc_grant), .nmc_rdata(nmc_rdata),
@@ -70,7 +69,6 @@ module layer_golden_tb;
         .nmc_grant(nmc_grant), .nmc_blocked(nmc_blocked),
         .nmc_rdata(nmc_rdata), .nmc_rvalid(nmc_rvalid));
 
-    // core hammering the bank while the NMC runs (loads / stores must retry cleanly)
     reg noise_en = 0;
     always @(negedge clk) if (noise_en) begin
         core_req  = $random & 1;
@@ -96,9 +94,10 @@ module layer_golden_tb;
     reg [31:0] ifm_mem [0:8191];
     reg [31:0] w_mem   [0:4095];
 
-    integer ifr, ifc, kr, kc, cin, cout, s, noise;
+    integer ifr, ifc, kr, kc, cin, cout, s, noise, cg;
     integer ofr, ofc, patch_r, patch_c, n_if, n_w, n_of;
-    integer i, cyc, fd;
+    integer i, cyc, cyc_all, fd, c0, cg_now, w_off, ngrp;
+    reg [63:0] s_total, s_mac, s_ops, s_stall, s_blk;
     reg [31:0] rd;
     reg        timed_out;
 
@@ -111,6 +110,7 @@ module layer_golden_tb;
         if (!$value$plusargs("COUT=%d",  cout))  cout  = 8;
         if (!$value$plusargs("S=%d",     s))     s     = 1;
         if (!$value$plusargs("NOISE=%d", noise)) noise = 0;
+        if (!$value$plusargs("CG=%d",    cg))    cg    = cin;
         if ($test$plusargs("VCD")) begin
             $dumpfile("sim/waveform/layer_golden_wave.vcd");
             $dumpvars(0, layer_golden_tb);
@@ -120,15 +120,14 @@ module layer_golden_tb;
         patch_r = 3*s + kr;         patch_c = 3*s + kc;
         n_if = cin*ifr*ifc;  n_w = cout*cin*kr*kc;  n_of = cout*ofr*ofc;
 
-        // read exactly the words this layer needs (no "not enough words" warnings)
         $readmemh("sim/data/ifmap.hex",   ifm_mem, 0, n_if - 1);
         $readmemh("sim/data/weights.hex", w_mem,   0, n_w  - 1);
 
-        d_ifmap_cols = ifc; d_kr = kr; d_kc = kc; d_cin = cin; d_cout = cout; d_stride = s;
+        // descriptor fields that do not depend on the Cin group
+        d_ifmap_cols = ifc; d_kr = kr; d_kc = kc; d_cout = cout; d_stride = s;
         d_ofr = ofr; d_ofc = ofc;
         d_if_ch = ifr*ifc; d_of_ch = ofr*ofc; d_if_rstep = s*ifc;
         d_rf_rstep = s*patch_c; d_rf_ch = patch_r*patch_c;
-        d_wpo = cin*kr*kc;
 
         #22 rst = 0;
 
@@ -136,14 +135,34 @@ module layer_golden_tb;
         for (i = 0; i < n_w;       i = i + 1) core_write(W_BASE   + i, w_mem[i]);
         for (i = 0; i < n_of + 16; i = i + 1) core_write(OFM_BASE + i, 32'hDEADBEEF);
 
-        noise_en = noise;
-        @(negedge clk); start = 1;
-        @(negedge clk); start = 0;
-        cyc = 0;
-        while (!done && cyc < 5000000) begin @(negedge clk); cyc = cyc + 1; end
-        timed_out = !done;                 // sample the 1-cycle done pulse NOW
-        noise_en = 0; @(negedge clk); core_req = 0;
-        if (timed_out) begin $display("TIMEOUT"); $finish; end
+        cyc_all = 0; ngrp = 0; c0 = 0; w_off = 0;
+        s_total = 0; s_mac = 0; s_ops = 0; s_stall = 0; s_blk = 0;
+
+        while (c0 < cin) begin
+            cg_now = (cin - c0 < cg) ? (cin - c0) : cg;
+            d_cin      = cg_now;
+            d_wpo      = cg_now*kr*kc;
+            d_if_base  = IFM_BASE + c0*ifr*ifc;
+            d_w_base   = W_BASE + w_off;
+            accumulate = (c0 != 0);            // group 0 stores, the rest reload + add
+
+            noise_en = noise;
+            @(negedge clk); start = 1;
+            @(negedge clk); start = 0;
+            cyc = 0;
+            while (!done && cyc < 5000000) begin @(negedge clk); cyc = cyc + 1; end
+            timed_out = !done;                 // sample the 1-cycle done pulse NOW
+            noise_en = 0; @(negedge clk); core_req = 0; core_we = 0;
+            if (timed_out) begin $display("TIMEOUT group %0d", ngrp); $finish; end
+
+            cyc_all = cyc_all + cyc;
+            s_total = s_total + p_total;  s_mac = s_mac + p_mac;   s_ops = s_ops + p_ops;
+            s_stall = s_stall + p_stall;  s_blk = s_blk + p_blk;
+
+            w_off = w_off + cout*cg_now*kr*kc;
+            c0    = c0 + cg_now;
+            ngrp  = ngrp + 1;
+        end
 
         fd = $fopen("sim/data/ofmap_rtl.hex", "w");
         for (i = 0; i < n_of + 16; i = i + 1) begin
@@ -152,9 +171,9 @@ module layer_golden_tb;
         end
         $fclose(fd);
 
-        $display("CYCLES=%0d", cyc);
+        $display("CYCLES=%0d GROUPS=%0d", cyc_all, ngrp);
         $display("PERF total=%0d mac=%0d ops=%0d stall=%0d blocked=%0d",
-                 p_total, p_mac, p_ops, p_stall, p_blk);
+                 s_total, s_mac, s_ops, s_stall, s_blk);
         $finish;
     end
 endmodule

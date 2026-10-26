@@ -1,6 +1,7 @@
 `timescale 1ns/1ps
 // Self-checking unit test for access_controller:
 //   compute handshake + load / store grants + arbiter + access window
+//   + psum reload (psum load vs pe_clear, psum RF free bits on the load channel)
 module access_controller_tb;
     localparam N = 16, NM = 8, MAW = 4;
     reg clk = 0, rst = 1;  always #5 clk = ~clk;
@@ -14,8 +15,8 @@ module access_controller_tb;
 
     // ---- load / store side ----
     reg  [NM-1:0]     ld_req = 0, st_req = 0, st_we = {NM{1'b1}};
-    reg  [NM-1:0]     ifree = {NM{1'b1}}, wfree = {NM{1'b1}};
-    reg               ld_is_w = 0;
+    reg  [NM-1:0]     ifree = {NM{1'b1}}, wfree = {NM{1'b1}}, psfree = {NM{1'b1}};
+    reg               ld_is_w = 0, ld_is_psum = 0;
     reg  [NM*MAW-1:0] ld_addr = 0, st_addr = 0;
     reg  [NM-1:0]     core_hit = 0;
     wire [NM-1:0]     nmc_req, nmc_we, ld_grant, st_grant;
@@ -30,8 +31,8 @@ module access_controller_tb;
         .ifrf_read_valid(ifv), .wrf_read_valid(wv), .ifrf_read_en(if_en), .wrf_read_en(wrf_en),
         .psum_req(psum_req), .psrf_read_valid(psv), .psrf_read_en(ps_en), .psrf_read_last(ps_last),
         .psum_ack(psum_ack), .pe_clear(pe_clear), .pe_mac_en(mac_en), .pe_psum_load(psum_load), .stall(stall),
-        .ld_req(ld_req), .ld_addr(ld_addr), .ld_is_weight(ld_is_w),
-        .ifrf_dst_free(ifree), .wrf_dst_free(wfree), .ld_grant(ld_grant),
+        .ld_req(ld_req), .ld_addr(ld_addr), .ld_is_weight(ld_is_w), .ld_is_psum(ld_is_psum),
+        .ifrf_dst_free(ifree), .wrf_dst_free(wfree), .psrf_dst_free(psfree), .ld_grant(ld_grant),
         .st_req(st_req), .st_we(st_we), .st_addr(st_addr), .st_grant(st_grant),
         .nmc_req(nmc_req), .nmc_we(nmc_we), .nmc_addr(nmc_addr), .nmc_grant(nmc_grant),
         .win_allow_cycles(allow), .win_block_cycles(block),
@@ -168,6 +169,40 @@ module access_controller_tb;
         block = 0; @(negedge clk); #1;
         check("window off: open", win_ok, 1);
         check("window off: nmc_req", nmc_req, 8'hFF);
+
+        // ================= PSUM RELOAD =================
+        ld_req = 0; st_req = 0; seq_valid = 0; psum_req = 0; allow = 16; block = 0;
+        @(negedge clk);
+
+        // 18. psum load must not land in the pe_clear cycle (clear would win in the MAC)
+        psum_req = 1; compute_start = 1; @(negedge clk); compute_start = 0; #1;
+        check("clear cycle: pe_clear",  pe_clear,  1);
+        check("clear cycle: no load",   psum_load, 0);
+        check("clear cycle: no ack",    psum_ack,  0);
+        check("clear cycle: no read_en", ps_en,    0);
+        @(negedge clk); #1;
+        check("after clear: pe_clear low", pe_clear, 0);
+        check("after clear: psum_load", psum_load, 1);
+        check("after clear: psum_ack",  psum_ack,  1);
+        psum_req = 0;
+
+        // 19. a psum reload on the load channel looks at the PSUM RF free bits only
+        ld_req = 8'hFF; ld_is_psum = 1; ifree = 0; wfree = 0; psfree = 8'hF0; #1;
+        check("ps job: nmc_req",   nmc_req,  8'hF0);
+        check("ps job: ld_grant",  ld_grant, 8'hF0);
+        check("ps job: nmc_we",    nmc_we,   0);
+        check("ps job: busy flag", ld_busy_blk, 1);
+        // all psum words free -> every lane granted even though IFMap/weight words are "live"
+        psfree = {NM{1'b1}}; #1;
+        check("ps job all free: nmc_req",  nmc_req,  8'hFF);
+        check("ps job all free: ld_grant", ld_grant, 8'hFF);
+        check("ps job all free: busy flag", ld_busy_blk, 0);
+        // 20. a store still beats a psum reload on the same macro
+        st_req = 8'h0C; #1;
+        check("ps vs store: st_grant", st_grant, 8'h0C);
+        check("ps vs store: ld_grant", ld_grant, 8'hF3);
+        st_req = 0; ld_is_psum = 0; ld_req = 0;
+        ifree = {NM{1'b1}}; wfree = {NM{1'b1}};
 
         if (errors == 0) $display("ALL TESTS PASSED"); else $display("%0d ERRORS", errors);
         $finish;

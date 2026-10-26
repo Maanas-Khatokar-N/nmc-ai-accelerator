@@ -1,20 +1,26 @@
 // ============================================================================
 // NMC unit  (one per memory bank)
 //
-//   layer descriptor --> address_generator --+--> RF write side (IFMap RF, weight RF)
+//   layer descriptor --> address_generator --+--> RF write side (IFMap RF, weight RF, psum RF)
 //                                            +--> access_controller --> PE array
-//                                            +--> NMC memory port (loads / stores)
+//                                            +--> NMC memory port (loads / reloads / stores)
 //
 // Contents:
-//   - address_generator      tile scheduler, compute sequencer, load + store generators
-//   - register_file x2       IFMap RF (8-bit, 16 read ports) and weight RF (8-bit, 1 read port)
-//                            (paper: two multi-port RFs; the psum RF joins when reload mode is wired)
-//   - access_controller      MAC / reload handshake
+//   - address_generator      tile scheduler, compute sequencer, load + store + reload generators
+//   - register_file x3       IFMap RF (8-bit, 16 read ports), weight RF (8-bit, 1 read port),
+//                            psum RF (32-bit, 16 words, 16 read ports; word i = PE i's psum)
+//                            all ping-pong (the psum RF follows the weight RF's half selects)
+//   - access_controller      MAC / psum-load handshake, load/store/reload arbitration
 //   - pe_array               16 PEs, weight-broadcast, output-stationary
 //   - store data mux         nmc_wdata[m] = accumulator selected by st_lane_sel[m]
 //
+// Cin splitting: when `accumulate` = 1 the OFMap tile of every (tile, oc) is reloaded
+// into the psum RF and loaded into the PEs before the MACs (Cin groups 1.. of a layer).
+// `accumulate` must be static while a layer runs.
+//
 // The memory side is the per-macro NMC port of sram_bank:
-//   nmc_req/we/addr/wdata out, nmc_grant/rdata in. nmc_rdata[m][7:0] feeds the RFs.
+//   nmc_req/we/addr/wdata out, nmc_grant/rdata in. nmc_rdata[m][7:0] feeds the IFMap/weight RFs,
+//   nmc_rdata[m][31:0] feeds the psum RF.
 //
 // dbg_* outputs expose internal strobes for testbenches / future perf counters.
 // ============================================================================
@@ -38,6 +44,7 @@ module nmc_unit #(
     input  wire rst,
     input  wire start,
     output wire done,
+    input  wire accumulate,                // 1: reload psums from OFMap before MACs (Cin groups 1..)
 
     // ---------------- layer descriptor ----------------
     input  wire [DIM_WIDTH-1:0]  ifmap_cols,
@@ -78,7 +85,7 @@ module nmc_unit #(
     output wire [CNT_W-1:0]    perf_cyc_mac, perf_cyc_stall, perf_cyc_mem_blocked, perf_mac_ops
 );
 
-    // ---------------- address generator ----------------
+    // ---------------- shared wires (declared before first use) ----------------
     wire                    compute_start, compute_done, seq_enable, seq_valid, seq_last;
     wire [NUM_PE*RF_AW-1:0] ifmap_rf_addr;
     wire [RF_AW-1:0]        weight_rf_addr;
@@ -97,6 +104,19 @@ module nmc_unit #(
     wire [NUM_MACROS-1:0]          ifrf_free, wrf_free;
     wire mem_allowed, mem_blk_cfg, mem_blk_core, ld_blk_busy;
 
+    // psum / reload path
+    wire                          psum_req, psum_ack, ld_is_psum;
+    wire [NUM_PE-1:0]             psrf_read_en, psrf_read_last;
+    wire [NUM_MACROS-1:0]         psrf_wr_en, psrf_free, ps_blk;
+    wire [NUM_MACROS*LANE_W-1:0]  psrf_wr_addr, psrf_chk_addr;
+    wire [NUM_PE*ACC_WIDTH-1:0]   ps_rd;
+    wire [NUM_PE-1:0]             ps_rv;
+    wire [NUM_PE*LANE_W-1:0]      ps_raddr;
+
+    // access controller / PE array strobes
+    wire pe_clear, pe_mac_en, pe_psum_load, ac_stall;
+
+    // ---------------- address generator ----------------
     address_generator #(
         .ADDR_WIDTH(ADDR_WIDTH), .DIM_WIDTH(DIM_WIDTH), .RF_AW(RF_AW),
         .NUM_MACROS(NUM_MACROS), .MACRO_AW(MACRO_AW),
@@ -109,17 +129,20 @@ module nmc_unit #(
         .ifmap_ch_size(ifmap_ch_size), .ofmap_ch_size(ofmap_ch_size), .ifmap_row_step(ifmap_row_step),
         .rf_row_step(rf_row_step), .rf_ch_stride(rf_ch_stride), .weights_per_oc(weights_per_oc),
         .ifmap_base_addr(ifmap_base_addr), .weight_base_addr(weight_base_addr), .ofmap_base_addr(ofmap_base_addr),
+        .accumulate(accumulate),
         .compute_start(compute_start), .compute_done(compute_done),
         .seq_enable(seq_enable), .seq_valid(seq_valid), .seq_last(seq_last),
         .ifmap_rf_addr(ifmap_rf_addr), .weight_rf_addr(weight_rf_addr), .pe_mask(pe_mask),
+        .psum_req(psum_req), .psum_ack(psum_ack),
         .ifrf_flush(ifrf_flush), .ifrf_flush_sel(ifrf_flush_sel),
         .ifrf_wr_sel(ifrf_wr_sel), .ifrf_rd_sel(ifrf_rd_sel),
         .wrf_flush(wrf_flush), .wrf_flush_sel(wrf_flush_sel),
         .wrf_wr_sel(wrf_wr_sel), .wrf_rd_sel(wrf_rd_sel),
         .st_capture(st_capture),
         .ifrf_wr_en(ifrf_wr_en), .wrf_wr_en(wrf_wr_en), .rf_wr_addr(rf_wr_addr),
+        .psrf_wr_en(psrf_wr_en), .psrf_wr_addr(psrf_wr_addr), .psrf_chk_addr(psrf_chk_addr),
         .ld_req(ld_req), .ld_addr(ld_addr), .ld_dst_addr(ld_dst_addr),
-        .ld_is_weight(ld_is_weight), .ld_grant(ld_grant),
+        .ld_is_weight(ld_is_weight), .ld_is_psum(ld_is_psum), .ld_grant(ld_grant),
         .st_req(st_req), .st_we(st_we), .st_addr(st_addr), .st_grant(st_grant),
         .st_lane_sel(st_lane_sel),
         .ph_load(ph_load), .ph_compute(ph_compute), .ph_store(ph_store)
@@ -158,10 +181,26 @@ module nmc_unit #(
         .read_en(wrf_read_en), .read_last(1'b0),
         .read_addr(weight_rf_addr), .read_data(w_rd), .read_valid(w_rv));
 
-    // ---------------- access controller + PE array ----------------
-    wire pe_clear, pe_mac_en, pe_psum_load, ac_stall, psum_ack;
-    wire [NUM_PE-1:0] psrf_read_en, psrf_read_last;
+    // ---------------- psum RF: 2 halves x 16 words x 32 bit (1 KB), word i = PE i ----------------
+    // Follows the weight RF's flush / half selects (one psum set per output channel, like the weights).
+    // Written by the reload generator one cycle after the grant (data = full 32-bit macro word),
+    // read by the PEs through psum_load; psrf_read_last consumes the words.
+    genvar gp;
+    generate for (gp = 0; gp < NUM_PE; gp = gp + 1) begin : g_psra
+        assign ps_raddr[gp*LANE_W +: LANE_W] = gp;       // read port i -> word i
+    end endgenerate
 
+    register_file_pp #(.DATA_WIDTH(ACC_WIDTH), .DEPTH(NUM_PE),
+                       .NUM_READ_PORTS(NUM_PE), .NUM_WRITE_PORTS(NUM_MACROS)) u_psrf (
+        .clk(clk), .rst(rst), .flush(wrf_flush), .flush_sel(wrf_flush_sel),
+        .wr_sel(wrf_wr_sel), .rd_sel(wrf_rd_sel),
+        .write_en(psrf_wr_en), .write_addr(psrf_wr_addr), .write_data(nmc_rdata),
+        .write_blocked(ps_blk),
+        .chk_addr(psrf_chk_addr), .chk_free(psrf_free),
+        .read_en(psrf_read_en), .read_last(psrf_read_last),
+        .read_addr(ps_raddr), .read_data(ps_rd), .read_valid(ps_rv));
+
+    // ---------------- access controller + PE array ----------------
     access_controller #(.NUM_PE(NUM_PE), .NUM_MACROS(NUM_MACROS), .MACRO_AW(MACRO_AW)) u_ac (
         .clk(clk), .rst(rst),
         // compute
@@ -169,12 +208,13 @@ module nmc_unit #(
         .seq_enable(seq_enable), .compute_done(compute_done),
         .ifrf_read_valid(if_rv), .wrf_read_valid(w_rv[0]),
         .ifrf_read_en(ifrf_read_en), .wrf_read_en(wrf_read_en),
-        .psum_req(1'b0), .psrf_read_valid({NUM_PE{1'b0}}),     // reload path: psum RF not wired yet
+        .psum_req(psum_req), .psrf_read_valid(ps_rv),
         .psrf_read_en(psrf_read_en), .psrf_read_last(psrf_read_last), .psum_ack(psum_ack),
         .pe_clear(pe_clear), .pe_mac_en(pe_mac_en), .pe_psum_load(pe_psum_load), .stall(ac_stall),
-        // load
-        .ld_req(ld_req), .ld_addr(ld_addr), .ld_is_weight(ld_is_weight),
-        .ifrf_dst_free(ifrf_free), .wrf_dst_free(wrf_free), .ld_grant(ld_grant),
+        // load (IFMap / weights / psum reload)
+        .ld_req(ld_req), .ld_addr(ld_addr), .ld_is_weight(ld_is_weight), .ld_is_psum(ld_is_psum),
+        .ifrf_dst_free(ifrf_free), .wrf_dst_free(wrf_free), .psrf_dst_free(psrf_free),
+        .ld_grant(ld_grant),
         // store
         .st_req(st_req), .st_we(st_we), .st_addr(st_addr), .st_grant(st_grant),
         // SRAM port
@@ -187,7 +227,7 @@ module nmc_unit #(
     wire signed [NUM_PE*ACC_WIDTH-1:0] acc_out;
     pe_array #(.NUM_PE(NUM_PE), .DATA_WIDTH(DATA_WIDTH), .ACC_WIDTH(ACC_WIDTH), .WEIGHT_BROADCAST(1)) u_pea (
         .clk(clk), .rst(rst), .clear(pe_clear), .pe_mask(pe_mask),
-        .psum_load(pe_psum_load), .mac_en(pe_mac_en), .psum_in({NUM_PE*ACC_WIDTH{1'b0}}),
+        .psum_load(pe_psum_load), .mac_en(pe_mac_en), .psum_in(ps_rd),
         .ifmap_in(if_rd), .weight_in(w_rd), .acc_out(acc_out));
 
     perf_counters #(.NUM_PE(NUM_PE), .CNT_W(CNT_W)) u_perf (

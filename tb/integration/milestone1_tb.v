@@ -45,7 +45,7 @@ module milestone1_tb;
         .ADDR_WIDTH(ADDR_WIDTH), .DIM_WIDTH(DIM_WIDTH), .RF_AW(RF_AW),
         .NUM_MACROS(NM), .MACRO_AW(MAW)
     ) dut (
-        .clk(clk), .rst(rst), .start(start), .done(done),
+        .clk(clk), .rst(rst), .start(start), .done(done), .accumulate(1'b0),
         .ifmap_cols(d_ifmap_cols), .kernel_rows(d_kr), .kernel_cols(d_kc),
         .input_channels(d_cin), .output_channels(d_cout), .stride(d_stride),
         .ofmap_rows(d_ofr), .ofmap_cols(d_ofc),
