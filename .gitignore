@@ -1,4 +1,4 @@
 *.vvp
 *.vcd
 sim/data/
-__pycache__/
+scripts/__pycache__/
