@@ -49,7 +49,16 @@ module cluster_tb;
         .core_req(core_req), .core_we(core_we), .core_addr(core_addr), .core_wdata(core_wdata),
         .core_rdata(core_rdata), .core_rvalid(core_rvalid),
         .perf_valid(perf_valid), .perf_cyc_total(p_total), .perf_cyc_mac(p_mac),
-        .perf_cyc_stall(p_stall), .perf_cyc_mem_blocked(p_blk), .perf_mac_ops(p_ops));
+        .perf_cyc_stall(p_stall), .perf_cyc_mem_blocked(p_blk), .perf_mac_ops(p_ops),
+        .pp_mask({NB{1'b0}}), .pp_start(1'b0), .pp_irq(), .pp_busy(),
+        .pp_src_base({NB*ADDR_WIDTH{1'b0}}), .pp_dst_base({NB*ADDR_WIDTH{1'b0}}),
+        .pp_src_cols({NB*DIM_WIDTH{1'b0}}), .pp_out_rows({NB*DIM_WIDTH{1'b0}}),
+        .pp_out_cols({NB*DIM_WIDTH{1'b0}}), .pp_channels({NB*DIM_WIDTH{1'b0}}),
+        .pp_pool_k({NB*DIM_WIDTH{1'b0}}), .pp_src_ch_size({NB*ADDR_WIDTH{1'b0}}),
+        .pp_row_step({NB*ADDR_WIDTH{1'b0}}), .pp_total_out({NB*ADDR_WIDTH{1'b0}}),
+        .pp_out_zp({NB*8{1'b0}}), .pp_relu_en({NB{1'b0}}),
+        .pp_qp_we({NB{1'b0}}), .pp_qp_waddr(9'd0), .pp_qp_bias(32'd0),
+        .pp_qp_mult(16'd0), .pp_qp_shift(5'd0));
 
     // ---------------- host-port noise: random reads on random banks ----------------
     reg noise_en = 0;
