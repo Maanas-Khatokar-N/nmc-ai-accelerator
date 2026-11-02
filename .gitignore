@@ -1,4 +1,8 @@
 *.vvp
 *.vcd
 sim/data/
+sim/image
+sim/build
+sim/waveform
+sim/
 scripts/__pycache__/
