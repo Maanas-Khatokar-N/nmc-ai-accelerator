@@ -164,7 +164,7 @@ module nmc_unit #(
     wire [0:0]                       w_rv;
 
     register_file_pp #(.DATA_WIDTH(DATA_WIDTH), .DEPTH(1<<RF_AW),
-                       .NUM_READ_PORTS(NUM_PE), .NUM_WRITE_PORTS(NUM_MACROS)) u_ifrf (
+                       .NUM_READ_PORTS(NUM_PE), .NUM_WRITE_PORTS(NUM_MACROS), .TRACK_READS(0)) u_ifrf (
         .clk(clk), .rst(rst), .flush(ifrf_flush), .flush_sel(ifrf_flush_sel),
         .wr_sel(ifrf_wr_sel), .rd_sel(ifrf_rd_sel),
         .write_en(ifrf_wr_en), .write_addr(rf_wr_addr), .write_data(rf_wdata), .write_blocked(if_blk),
@@ -173,7 +173,7 @@ module nmc_unit #(
         .read_addr(ifmap_rf_addr), .read_data(if_rd), .read_valid(if_rv));
 
     register_file_pp #(.DATA_WIDTH(DATA_WIDTH), .DEPTH(1<<RF_AW),
-                       .NUM_READ_PORTS(1), .NUM_WRITE_PORTS(NUM_MACROS)) u_wrf (
+                       .NUM_READ_PORTS(1), .NUM_WRITE_PORTS(NUM_MACROS), .TRACK_READS(0)) u_wrf (
         .clk(clk), .rst(rst), .flush(wrf_flush), .flush_sel(wrf_flush_sel),
         .wr_sel(wrf_wr_sel), .rd_sel(wrf_rd_sel),
         .write_en(wrf_wr_en), .write_addr(rf_wr_addr), .write_data(rf_wdata), .write_blocked(w_blk),
@@ -191,7 +191,7 @@ module nmc_unit #(
     end endgenerate
 
     register_file_pp #(.DATA_WIDTH(ACC_WIDTH), .DEPTH(NUM_PE),
-                       .NUM_READ_PORTS(NUM_PE), .NUM_WRITE_PORTS(NUM_MACROS)) u_psrf (
+                       .NUM_READ_PORTS(NUM_PE), .NUM_WRITE_PORTS(NUM_MACROS), .BANKED_STORAGE(0)) u_psrf (
         .clk(clk), .rst(rst), .flush(wrf_flush), .flush_sel(wrf_flush_sel),
         .wr_sel(wrf_wr_sel), .rd_sel(wrf_rd_sel),
         .write_en(psrf_wr_en), .write_addr(psrf_wr_addr), .write_data(nmc_rdata),
