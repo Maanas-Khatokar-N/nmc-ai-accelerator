@@ -1,7 +1,7 @@
 `timescale 1ns/1ps
 // Randomised equivalence: new register_file (banked / flat, TRACK_READS 1 / 0) vs the original model.
 // Writes obey the banked contract (consecutive addresses in one cycle); reads, chk, flush are random.
-//   iverilog -g2012 -o sim/build/rf_equiv.vvp tb/unit/register_file_equiv_tb.v tb/models/register_file_ref.v rtl/regfile/register_file.v && vvp sim/build/rf_equiv.vvp
+//   iverilog -g2012 -o sim/build/rf_equiv.vvp tb/unit/register_file_equiv_tb.v tb/unit/register_file_ref.v rtl/regfile/register_file.v && vvp sim/build/rf_equiv.vvp
 module register_file_equiv_tb;
     parameter DW = 8, DEPTH = 64, NR = 16, NW = 8, AW = $clog2(DEPTH), CYCLES = 30000;
 

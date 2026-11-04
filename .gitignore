@@ -6,3 +6,4 @@ sim/build
 sim/waveform
 sim/
 scripts/__pycache__/
+patch/

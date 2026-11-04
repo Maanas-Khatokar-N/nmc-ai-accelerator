@@ -2,7 +2,7 @@
 //   wr_sel / flush_sel pick the half that is written / flushed (loader side)
 //   rd_sel picks the half that is read and whose D/V bits are updated (compute side)
 //   chk_addr / chk_free: per-word "is the destination free (V=0)?" query on the WRITE half
-// BANKED_STORAGE / TRACK_READS are passed to both halves (see register_file.v).
+// BANKED_STORAGE / TRACK_READS / WORD_VALID are passed to both halves (see register_file.v).
 module register_file_pp #(
     parameter DATA_WIDTH      = 32,
     parameter DEPTH           = 256,
@@ -11,6 +11,7 @@ module register_file_pp #(
     parameter ENFORCE_REPLACE = 1,
     parameter BANKED_STORAGE  = 1,
     parameter TRACK_READS     = 1,
+    parameter WORD_VALID      = 1,
     parameter ADDR_WIDTH      = $clog2(DEPTH)
 ) (
     input clk, rst,
@@ -36,7 +37,7 @@ module register_file_pp #(
 
     register_file #(.DATA_WIDTH(DATA_WIDTH), .DEPTH(DEPTH), .NUM_READ_PORTS(NUM_READ_PORTS),
                     .NUM_WRITE_PORTS(NUM_WRITE_PORTS), .ENFORCE_REPLACE(ENFORCE_REPLACE),
-                    .BANKED_STORAGE(BANKED_STORAGE), .TRACK_READS(TRACK_READS),
+                    .BANKED_STORAGE(BANKED_STORAGE), .TRACK_READS(TRACK_READS), .WORD_VALID(WORD_VALID),
                     .ADDR_WIDTH(ADDR_WIDTH)) u_a (
         .clk(clk), .rst(rst), .flush(flush & ~flush_sel),
         .write_en(write_en & {NUM_WRITE_PORTS{~wr_sel}}), .write_addr(write_addr),
@@ -47,7 +48,7 @@ module register_file_pp #(
 
     register_file #(.DATA_WIDTH(DATA_WIDTH), .DEPTH(DEPTH), .NUM_READ_PORTS(NUM_READ_PORTS),
                     .NUM_WRITE_PORTS(NUM_WRITE_PORTS), .ENFORCE_REPLACE(ENFORCE_REPLACE),
-                    .BANKED_STORAGE(BANKED_STORAGE), .TRACK_READS(TRACK_READS),
+                    .BANKED_STORAGE(BANKED_STORAGE), .TRACK_READS(TRACK_READS), .WORD_VALID(WORD_VALID),
                     .ADDR_WIDTH(ADDR_WIDTH)) u_b (
         .clk(clk), .rst(rst), .flush(flush & flush_sel),
         .write_en(write_en & {NUM_WRITE_PORTS{wr_sel}}), .write_addr(write_addr),

@@ -107,11 +107,10 @@ module nmc_unit #(
     // psum / reload path
     wire                          psum_req, psum_ack, ld_is_psum;
     wire [NUM_PE-1:0]             psrf_read_en, psrf_read_last;
-    wire [NUM_MACROS-1:0]         psrf_wr_en, psrf_free, ps_blk;
+    wire [NUM_MACROS-1:0]         psrf_wr_en, psrf_free;
     wire [NUM_MACROS*LANE_W-1:0]  psrf_wr_addr, psrf_chk_addr;
     wire [NUM_PE*ACC_WIDTH-1:0]   ps_rd;
     wire [NUM_PE-1:0]             ps_rv;
-    wire [NUM_PE*LANE_W-1:0]      ps_raddr;
 
     // access controller / PE array strobes
     wire pe_clear, pe_mac_en, pe_psum_load, ac_stall;
@@ -164,7 +163,7 @@ module nmc_unit #(
     wire [0:0]                       w_rv;
 
     register_file_pp #(.DATA_WIDTH(DATA_WIDTH), .DEPTH(1<<RF_AW),
-                       .NUM_READ_PORTS(NUM_PE), .NUM_WRITE_PORTS(NUM_MACROS), .TRACK_READS(0)) u_ifrf (
+                       .NUM_READ_PORTS(NUM_PE), .NUM_WRITE_PORTS(NUM_MACROS), .TRACK_READS(0), .WORD_VALID(0)) u_ifrf (
         .clk(clk), .rst(rst), .flush(ifrf_flush), .flush_sel(ifrf_flush_sel),
         .wr_sel(ifrf_wr_sel), .rd_sel(ifrf_rd_sel),
         .write_en(ifrf_wr_en), .write_addr(rf_wr_addr), .write_data(rf_wdata), .write_blocked(if_blk),
@@ -173,7 +172,7 @@ module nmc_unit #(
         .read_addr(ifmap_rf_addr), .read_data(if_rd), .read_valid(if_rv));
 
     register_file_pp #(.DATA_WIDTH(DATA_WIDTH), .DEPTH(1<<RF_AW),
-                       .NUM_READ_PORTS(1), .NUM_WRITE_PORTS(NUM_MACROS), .TRACK_READS(0)) u_wrf (
+                       .NUM_READ_PORTS(1), .NUM_WRITE_PORTS(NUM_MACROS), .TRACK_READS(0), .WORD_VALID(0)) u_wrf (
         .clk(clk), .rst(rst), .flush(wrf_flush), .flush_sel(wrf_flush_sel),
         .wr_sel(wrf_wr_sel), .rd_sel(wrf_rd_sel),
         .write_en(wrf_wr_en), .write_addr(rf_wr_addr), .write_data(rf_wdata), .write_blocked(w_blk),
@@ -185,20 +184,14 @@ module nmc_unit #(
     // Follows the weight RF's flush / half selects (one psum set per output channel, like the weights).
     // Written by the reload generator one cycle after the grant (data = full 32-bit macro word),
     // read by the PEs through psum_load; psrf_read_last consumes the words.
-    genvar gp;
-    generate for (gp = 0; gp < NUM_PE; gp = gp + 1) begin : g_psra
-        assign ps_raddr[gp*LANE_W +: LANE_W] = gp;       // read port i -> word i
-    end endgenerate
-
-    register_file_pp #(.DATA_WIDTH(ACC_WIDTH), .DEPTH(NUM_PE),
-                       .NUM_READ_PORTS(NUM_PE), .NUM_WRITE_PORTS(NUM_MACROS), .BANKED_STORAGE(0)) u_psrf (
+    psum_rf_pp #(.NUM_PE(NUM_PE), .DATA_WIDTH(ACC_WIDTH),
+                 .NUM_MACROS(NUM_MACROS), .PE_COLS(PE_COLS)) u_psrf (
         .clk(clk), .rst(rst), .flush(wrf_flush), .flush_sel(wrf_flush_sel),
         .wr_sel(wrf_wr_sel), .rd_sel(wrf_rd_sel),
         .write_en(psrf_wr_en), .write_addr(psrf_wr_addr), .write_data(nmc_rdata),
-        .write_blocked(ps_blk),
         .chk_addr(psrf_chk_addr), .chk_free(psrf_free),
         .read_en(psrf_read_en), .read_last(psrf_read_last),
-        .read_addr(ps_raddr), .read_data(ps_rd), .read_valid(ps_rv));
+        .read_data(ps_rd), .read_valid(ps_rv));
 
     // ---------------- access controller + PE array ----------------
     access_controller #(.NUM_PE(NUM_PE), .NUM_MACROS(NUM_MACROS), .MACRO_AW(MACRO_AW)) u_ac (

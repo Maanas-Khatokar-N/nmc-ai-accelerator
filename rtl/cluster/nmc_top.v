@@ -68,7 +68,7 @@ module nmc_top #(
     assign bus_rdata = we_q ? 32'h0 : (sel_q ? reg_rdata : core_rdata);
     assign bus_err   = sel_q & reg_err;
 
-    // ---------------- regs <-> cluster wires (names match the ports) ----------------
+    // ---------------- regs <-> cluster wires (names match the ports; connected explicitly, no `.*`) ----------------
     wire [NUM_BANKS-1:0] unit_mask, accumulate, unit_busy, pp_mask, pp_busy, pp_relu_en, pp_qp_we, perf_valid;
     wire start, irq, pp_start, pp_irq;
     wire [NUM_BANKS*DIM_WIDTH-1:0]  ifmap_cols, kernel_rows, kernel_cols, input_channels, output_channels, stride,
@@ -89,7 +89,19 @@ module nmc_top #(
         .clk(clk), .rst(rst),
         .reg_req(reg_req), .reg_we(bus_we), .reg_addr(bus_addr[REG_AW-1:0]), .reg_wdata(bus_wdata),
         .reg_rvalid(reg_rvalid), .reg_rdata(reg_rdata), .reg_err(reg_err), .irq_o(irq_o),
-        .*);
+                .unit_mask(unit_mask), .start(start), .accumulate(accumulate), .irq(irq),
+        .unit_busy(unit_busy), .ifmap_cols(ifmap_cols), .kernel_rows(kernel_rows), .kernel_cols(kernel_cols),
+        .input_channels(input_channels), .output_channels(output_channels), .stride(stride), .ofmap_rows(ofmap_rows),
+        .ofmap_cols(ofmap_cols), .weights_per_oc(weights_per_oc), .ifmap_ch_size(ifmap_ch_size), .ofmap_ch_size(ofmap_ch_size),
+        .ifmap_row_step(ifmap_row_step), .ifmap_base_addr(ifmap_base_addr), .weight_base_addr(weight_base_addr), .ofmap_base_addr(ofmap_base_addr),
+        .rf_row_step(rf_row_step), .rf_ch_stride(rf_ch_stride), .pp_mask(pp_mask), .pp_start(pp_start),
+        .pp_irq(pp_irq), .pp_busy(pp_busy), .pp_src_base(pp_src_base), .pp_dst_base(pp_dst_base),
+        .pp_src_cols(pp_src_cols), .pp_out_rows(pp_out_rows), .pp_out_cols(pp_out_cols), .pp_channels(pp_channels),
+        .pp_pool_k(pp_pool_k), .pp_src_ch_size(pp_src_ch_size), .pp_row_step(pp_row_step), .pp_total_out(pp_total_out),
+        .pp_out_zp(pp_out_zp), .pp_relu_en(pp_relu_en), .pp_qp_we(pp_qp_we), .pp_qp_waddr(pp_qp_waddr),
+        .pp_qp_bias(pp_qp_bias), .pp_qp_mult(pp_qp_mult), .pp_qp_shift(pp_qp_shift), .perf_valid(perf_valid),
+        .perf_cyc_total(perf_cyc_total), .perf_cyc_mac(perf_cyc_mac), .perf_cyc_stall(perf_cyc_stall), .perf_cyc_mem_blocked(perf_cyc_mem_blocked),
+        .perf_mac_ops(perf_mac_ops));
 
     nmc_cluster #(.NUM_BANKS(NUM_BANKS), .ADDR_WIDTH(ADDR_WIDTH), .DIM_WIDTH(DIM_WIDTH), .RF_AW(RF_AW),
                   .NUM_MACROS(NUM_MACROS), .DEPTH_PER_MACRO(DEPTH_PER_MACRO), .CNT_W(CNT_W),
@@ -97,6 +109,18 @@ module nmc_top #(
         .clk(clk), .rst(rst),
         .core_req(core_req), .core_we(bus_we), .core_addr(core_addr), .core_wdata(bus_wdata),
         .core_rdata(core_rdata), .core_rvalid(core_rvalid),
-        .*);
+                .unit_mask(unit_mask), .start(start), .accumulate(accumulate), .irq(irq),
+        .unit_busy(unit_busy), .ifmap_cols(ifmap_cols), .kernel_rows(kernel_rows), .kernel_cols(kernel_cols),
+        .input_channels(input_channels), .output_channels(output_channels), .stride(stride), .ofmap_rows(ofmap_rows),
+        .ofmap_cols(ofmap_cols), .weights_per_oc(weights_per_oc), .ifmap_ch_size(ifmap_ch_size), .ofmap_ch_size(ofmap_ch_size),
+        .ifmap_row_step(ifmap_row_step), .ifmap_base_addr(ifmap_base_addr), .weight_base_addr(weight_base_addr), .ofmap_base_addr(ofmap_base_addr),
+        .rf_row_step(rf_row_step), .rf_ch_stride(rf_ch_stride), .pp_mask(pp_mask), .pp_start(pp_start),
+        .pp_irq(pp_irq), .pp_busy(pp_busy), .pp_src_base(pp_src_base), .pp_dst_base(pp_dst_base),
+        .pp_src_cols(pp_src_cols), .pp_out_rows(pp_out_rows), .pp_out_cols(pp_out_cols), .pp_channels(pp_channels),
+        .pp_pool_k(pp_pool_k), .pp_src_ch_size(pp_src_ch_size), .pp_row_step(pp_row_step), .pp_total_out(pp_total_out),
+        .pp_out_zp(pp_out_zp), .pp_relu_en(pp_relu_en), .pp_qp_we(pp_qp_we), .pp_qp_waddr(pp_qp_waddr),
+        .pp_qp_bias(pp_qp_bias), .pp_qp_mult(pp_qp_mult), .pp_qp_shift(pp_qp_shift), .perf_valid(perf_valid),
+        .perf_cyc_total(perf_cyc_total), .perf_cyc_mac(perf_cyc_mac), .perf_cyc_stall(perf_cyc_stall), .perf_cyc_mem_blocked(perf_cyc_mem_blocked),
+        .perf_mac_ops(perf_mac_ops));
 
 endmodule

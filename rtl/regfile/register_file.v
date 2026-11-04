@@ -40,6 +40,16 @@
 //  TRACK_READS = 0: read_en / read_last are IGNORED. V only changes by write and flush,
 //    D is never set. Removes read_ports x DEPTH update logic. Valid whenever the user never
 //    consumes words with read_last (IFMap RF and weight RF in nmc_unit tie it to 0).
+//  WORD_VALID = 1 (default): per-word D/V bits as described above.
+//  WORD_VALID = 0: NO per-word state at all. read_valid = 1, chk_free = 1, write_blocked = 0,
+//    read_data is the raw stored word (not masked), flush only gates data writes.
+//    This removes the three 256:1 V-bit muxes per port and the V update logic (the biggest
+//    LUT consumer of the RF). Only safe when the owner guarantees, at half level, that
+//    (a) a word is not read before it was written and (b) a live word is not overwritten.
+//    In nmc_unit this is what if_full / w_full + flush-before-load already guarantee for the
+//    IFMap RF and the weight RF (compute starts only when both halves are loaded; the loader
+//    only fills a half after it was released and flushed). Keep WORD_VALID=1 for the psum RF.
+//    Reading a never-written word returns the old content (X in simulation), not 0.
 // ============================================================================
 module register_file #(
     parameter DATA_WIDTH      = 32,
@@ -49,6 +59,7 @@ module register_file #(
     parameter ENFORCE_REPLACE = 1,
     parameter BANKED_STORAGE  = 1,
     parameter TRACK_READS     = 1,
+    parameter WORD_VALID      = 1,
     parameter ADDR_WIDTH      = $clog2(DEPTH)
 ) (
     input clk, rst,
@@ -142,19 +153,24 @@ module register_file #(
     always @(*) begin
         for (ri = 0; ri < NUM_READ_PORTS; ri = ri + 1) begin
             ra = read_addr[ri*ADDR_WIDTH +: ADDR_WIDTH];
-            read_valid[ri] = v_bit[ra];
-            read_data[ri*DATA_WIDTH +: DATA_WIDTH] =
-                v_bit[ra] ? raw_rd[ri*DATA_WIDTH +: DATA_WIDTH] : {DATA_WIDTH{1'b0}};
+            if (WORD_VALID != 0) begin
+                read_valid[ri] = v_bit[ra];
+                read_data[ri*DATA_WIDTH +: DATA_WIDTH] =
+                    v_bit[ra] ? raw_rd[ri*DATA_WIDTH +: DATA_WIDTH] : {DATA_WIDTH{1'b0}};
+            end else begin
+                read_valid[ri] = 1'b1;
+                read_data[ri*DATA_WIDTH +: DATA_WIDTH] = raw_rd[ri*DATA_WIDTH +: DATA_WIDTH];
+            end
         end
 
         for (w = 0; w < NUM_WRITE_PORTS; w = w + 1) begin
             wa = write_addr[w*ADDR_WIDTH +: ADDR_WIDTH];
-            write_blocked[w] = write_en[w] && (ENFORCE_REPLACE != 0) && v_bit[wa];
+            write_blocked[w] = (WORD_VALID != 0) && write_en[w] && (ENFORCE_REPLACE != 0) && v_bit[wa];
         end
 
         for (w = 0; w < NUM_WRITE_PORTS; w = w + 1) begin
             ca = chk_addr[w*ADDR_WIDTH +: ADDR_WIDTH];
-            chk_free[w] = ~v_bit[ca];
+            chk_free[w] = (WORD_VALID != 0) ? ~v_bit[ca] : 1'b1;
         end
     end
 
@@ -179,6 +195,7 @@ module register_file #(
             nd = d_bit;
             nv = v_bit;
 
+            if (WORD_VALID != 0) begin
             if (TRACK_READS != 0)
                 for (i = 0; i < NUM_READ_PORTS; i = i + 1) begin
                     ra_s = read_addr[i*ADDR_WIDTH +: ADDR_WIDTH];
@@ -194,6 +211,7 @@ module register_file #(
                     nd[wa_t] = 1'b0;
                     nv[wa_t] = 1'b1;
                 end
+            end
             end
 
             d_bit <= nd;
