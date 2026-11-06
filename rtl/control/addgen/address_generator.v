@@ -241,7 +241,16 @@ module address_generator #(
         end
     end
 
-    assign pe_mask = meta_mask[cp_ifb];
+    // PE mask of the tile being computed, latched once per (tile, output channel) at compute_start.
+    // It used to be meta_mask[cp_ifb] read every cycle: a half-select mux with fanout ~170 in front of
+    // the MAC-enable decision, which was the last failing path at 100 MHz on the 7z020.
+    // Needed from the cycle after compute_start (psum load waits out the pe_clear cycle, the first MAC
+    // appears >= 2 cycles after compute_start), so it is always ready in time.
+    reg [NUM_PE-1:0] cmp_mask;
+    always @(posedge clk or posedge rst)
+        if (rst)                    cmp_mask <= {NUM_PE{1'b0}};
+        else if (cstate == C_GO)    cmp_mask <= meta_mask[cp_ifb];
+    assign pe_mask = cmp_mask;
 
     // ------------------------------------------------------------------
     // 2. Compute sequencer
