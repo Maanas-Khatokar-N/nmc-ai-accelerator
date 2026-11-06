@@ -141,32 +141,43 @@ module postproc_unit #(
     reg                        rd_q, rd_first_q, rd_last_q, win_v;
     reg [SEL_W-1:0]            rd_macro_q;
     reg [DIM_WIDTH-1:0]        rd_oc_q;
+    // extra stage: capture the selected macro word first, so the BRAM-output mux and the 32-bit
+    // compare are not in one cycle (timing on the 7z020). Everything below runs one cycle later.
+    reg                        rd_q2, rd_first_q2, rd_last_q2;
+    reg [DIM_WIDTH-1:0]        rd_oc_q2;
+    reg signed [ACC_W-1:0]     rdat_q;
     reg signed [ACC_W-1:0]     pmax;
-    wire signed [ACC_W-1:0]    rdat = nmc_rdata[rd_macro_q*32 +: ACC_W];
+    wire signed [ACC_W-1:0]    rdat = rdat_q;
 
     reg [QW-1:0] qp_mem [0:MAX_OC-1];
     reg [QW-1:0] qp_q;
     always @(posedge clk) begin
         if (qp_we) qp_mem[qp_waddr] <= {qp_bias, qp_mult, qp_shift};
-        qp_q <= qp_mem[rd_oc_q[QA_W-1:0]];
+        qp_q <= qp_mem[rd_oc_q2[QA_W-1:0]];
+        rdat_q <= nmc_rdata[rd_macro_q*32 +: ACC_W];
     end
 
     always @(posedge clk or posedge rst) begin
         if (rst) begin
             rd_q <= 1'b0; win_v <= 1'b0;
             rd_first_q <= 1'b0; rd_last_q <= 1'b0; rd_macro_q <= 0; rd_oc_q <= 0;
+            rd_q2 <= 1'b0; rd_first_q2 <= 1'b0; rd_last_q2 <= 1'b0; rd_oc_q2 <= 0;
         end else begin
             rd_q       <= rd_fire;
             rd_first_q <= first_el;
             rd_last_q  <= last_el;
             rd_macro_q <= rd_macro;
             rd_oc_q    <= oc_cnt;
-            win_v      <= rd_q && rd_last_q;
+            rd_q2       <= rd_q;
+            rd_first_q2 <= rd_first_q;
+            rd_last_q2  <= rd_last_q;
+            rd_oc_q2    <= rd_oc_q;
+            win_v      <= rd_q2 && rd_last_q2;
         end
     end
 
     always @(posedge clk)
-        if (rd_q && (rd_first_q || (rdat > pmax))) pmax <= rdat;
+        if (rd_q2 && (rd_first_q2 || (rdat > pmax))) pmax <= rdat;
 
     // ------------------------------------------------------------------
     // Requant + ReLU

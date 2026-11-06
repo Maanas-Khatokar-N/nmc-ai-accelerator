@@ -64,9 +64,8 @@ module store_reload_generator #(
     reg                       fresh;
     reg [NUM_MACROS-1:0]      pend;
     reg [ADDR_WIDTH-1:0]      row_addr;        // word address of column 0 of the current PE row
-    reg [DIM_WIDTH-1:0]       row_cnt;
+    reg [VR_W-1:0]            rows_left;       // PE rows still to do after the current one
     reg [LANE_W-1:0]          lane_base;       // row * PE_COLS
-    reg [VR_W-1:0]            vrows_q;
     reg [VC_W-1:0]            vcols_q;
     reg                       fin1;
 
@@ -101,13 +100,13 @@ module store_reload_generator #(
 
     wire [NUM_MACROS-1:0] granted = nmc_req & nmc_grant;
     wire [NUM_MACROS-1:0] rem     = cur_pend & ~nmc_grant;
-    wire more_rows = (row_cnt + 1 < vrows_q);
+    wire more_rows = (rows_left != 0);
 
     always @(posedge clk or posedge rst) begin
         if (rst) begin
             busy <= 1'b0; done <= 1'b0; fin1 <= 1'b0;
             mode_reload <= 1'b0; fresh <= 1'b0; pend <= 0;
-            row_addr <= 0; row_cnt <= 0; lane_base <= 0; vrows_q <= 0; vcols_q <= 0;
+            row_addr <= 0; rows_left <= 0; lane_base <= 0; vcols_q <= 0;
             rl_en_q <= 0; rl_lane_q <= 0;
         end else begin
             done    <= fin1;
@@ -119,9 +118,8 @@ module store_reload_generator #(
                 mode_reload <= reload;
                 fresh       <= 1'b1;
                 row_addr    <= ofmap_tile_addr;
-                row_cnt     <= 0;
+                rows_left   <= (valid_rows > 1) ? (valid_rows - 1'b1) : {VR_W{1'b0}};
                 lane_base   <= 0;
-                vrows_q     <= valid_rows;
                 vcols_q     <= valid_cols;
             end else if (busy) begin
                 if (mode_reload) begin
@@ -131,7 +129,7 @@ module store_reload_generator #(
                 if (rem == 0) begin
                     fresh <= 1'b1;
                     if (more_rows) begin
-                        row_cnt   <= row_cnt + 1'b1;
+                        rows_left <= rows_left - 1'b1;
                         row_addr  <= row_addr + ofmap_cols;
                         lane_base <= lane_base + PE_COLS;
                     end else begin

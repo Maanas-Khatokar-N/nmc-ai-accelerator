@@ -223,10 +223,15 @@ module nmc_unit #(
         .psum_load(pe_psum_load), .mac_en(pe_mac_en), .psum_in(ps_rd),
         .ifmap_in(if_rd), .weight_in(w_rd), .acc_out(acc_out));
 
+    // perf only: register the 'request lost to the core' flag so the host-side grant logic
+    // stays out of the 48-bit counter's enable path (counts the same cycles, one cycle later)
+    reg mem_blk_q;
+    always @(posedge clk) mem_blk_q <= |(nmc_req & ~nmc_grant);
+
     perf_counters #(.NUM_PE(NUM_PE), .CNT_W(CNT_W)) u_perf (
         .clk(clk), .rst(rst), .start(start), .done(done),
         .mac_en(pe_mac_en), .pe_mask(pe_mask), .stall(ac_stall),
-        .mem_blocked(|(nmc_req & ~nmc_grant)),
+        .mem_blocked(mem_blk_q),
         .ph_load(ph_load), .ph_compute(ph_compute), .ph_store(ph_store),
         .running(), .perf_valid(perf_valid),
         .cyc_total(perf_cyc_total), .cyc_load(perf_cyc_load),

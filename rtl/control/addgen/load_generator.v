@@ -95,13 +95,19 @@ module load_generator #(
     reg                       grp_fresh;      // pending set = lane_valid (not yet partially served)
     reg [NUM_MACROS-1:0]      pend;
     reg [ADDR_WIDTH-4:0]      g;              // macro-local address of the current group
-    reg signed [SW-1:0]       rel0;           // (word of lane 0) - (run start word)
+    // Words still to fetch in the current run, counted from lane 0 of the current group, and the
+    // number of lanes below the run start (first group of a run only). They replace the old signed
+    // 'rel0' offset: lane_valid / last_group no longer need 18-bit adders + comparators in the
+    // grant -> clock-enable path (that was the critical path on the 7z020).
+    //     rel0 = lo-based:   remw = run_len - rel0,  lo = max(0, -rel0)
+    reg [DIM_WIDTH:0]         remw;
+    reg [2:0]                 lo;
     reg [RF_AW-1:0]           dst0;           // RF address of lane 0 (wraps for lanes below run start)
     reg [DIM_WIDTH-1:0]       run_len;
 
     // outer loops (patch job)
-    reg [DIM_WIDTH-1:0]       lrows;
-    reg [DIM_WIDTH-1:0]       row_cnt, ch_cnt;
+    reg [DIM_WIDTH-1:0]       lrows_m1;           // rows of the patch - 1
+    reg [DIM_WIDTH-1:0]       rows_left, ch_left; // rows / channels still to come after the current run
     reg [ADDR_WIDTH-1:0]      a_ptr, ch_ptr;
     reg [RF_AW-1:0]           d_ptr, ch_dst;
 
@@ -116,16 +122,14 @@ module load_generator #(
     // Which lanes of the current group belong to the run
     // ------------------------------------------------------------------
     reg [NUM_MACROS-1:0] lane_valid;
-    reg signed [SW-1:0]  rel_m;
     integer m;
     always @(*) begin
-        for (m = 0; m < NUM_MACROS; m = m + 1) begin
-            rel_m         = rel0 + m;
-            lane_valid[m] = (rel_m >= 0) && (rel_m < $signed({2'b00, run_len}));
-        end
+        for (m = 0; m < NUM_MACROS; m = m + 1)
+            lane_valid[m] = (m >= lo) && ((|remw[DIM_WIDTH:3]) || (remw[2:0] > m));   // remw > m
     end
 
-    wire last_group = ((rel0 + NUM_MACROS) >= $signed({2'b00, run_len}));
+    // remw <= NUM_MACROS (8)
+    wire last_group = (remw[DIM_WIDTH:4] == 0) && (!remw[3] || (remw[2:0] == 3'd0));
 
     wire [NUM_MACROS-1:0] cur_pend = grp_fresh ? lane_valid : pend;
     assign nmc_req = busy ? cur_pend : {NUM_MACROS{1'b0}};
@@ -141,28 +145,23 @@ module load_generator #(
     // ------------------------------------------------------------------
     // Next run (patch job only): next row of this channel, else next channel
     // ------------------------------------------------------------------
-    wire more_rows = (row_cnt + 1 < lrows);
-    wire more_ch   = (ch_cnt + 1 < input_channels);
+    wire more_rows = (rows_left != 0);
+    wire more_ch   = (ch_left   != 0);
     wire more_runs = !job_w && (more_rows || more_ch);
 
     reg [ADDR_WIDTH-1:0] nx_a, nx_chptr;
     reg [RF_AW-1:0]      nx_d, nx_chdst;
-    reg [DIM_WIDTH-1:0]  nx_row, nx_ch;
     always @(*) begin
         nx_chptr = ch_ptr;
         nx_chdst = ch_dst;
-        nx_ch    = ch_cnt;
         if (more_rows) begin
             nx_a   = a_ptr + ifmap_cols;
             nx_d   = d_ptr + patch_cols;
-            nx_row = row_cnt + 1'b1;
         end else begin
             nx_chptr = ch_ptr + ifmap_ch_size;
             nx_chdst = ch_dst + rf_ch_stride;
-            nx_ch    = ch_cnt + 1'b1;
             nx_a     = nx_chptr;
             nx_d     = nx_chdst;
-            nx_row   = 0;
         end
     end
 
@@ -183,8 +182,8 @@ module load_generator #(
         if (rst) begin
             busy <= 1'b0; done <= 1'b0; fin1 <= 1'b0;
             job_w <= 1'b0; grp_fresh <= 1'b0; pend <= 0;
-            g <= 0; rel0 <= 0; dst0 <= 0; run_len <= 0;
-            lrows <= 0; row_cnt <= 0; ch_cnt <= 0;
+            g <= 0; remw <= 0; lo <= 0; dst0 <= 0; run_len <= 0;
+            lrows_m1 <= 0; rows_left <= 0; ch_left <= 0;
             a_ptr <= 0; ch_ptr <= 0; d_ptr <= 0; ch_dst <= 0;
             wr_en_q <= 0; wr_addr_q <= 0; wr_w_q <= 1'b0;
         end else begin
@@ -197,15 +196,16 @@ module load_generator #(
                 job_w     <= job_weights;
                 grp_fresh <= 1'b1;
                 run_len   <= job_weights ? weights_per_oc : lc_acc;
-                lrows     <= lr_acc;
-                row_cnt   <= 0;
-                ch_cnt    <= 0;
+                lrows_m1  <= lr_acc - 1'b1;
+                rows_left <= lr_acc - 1'b1;
+                ch_left   <= input_channels - 1'b1;
                 a_ptr     <= a0;
                 ch_ptr    <= a0;
                 d_ptr     <= 0;
                 ch_dst    <= 0;
                 g         <= a0[ADDR_WIDTH-1:3];
-                rel0      <= -$signed({{(SW-3){1'b0}}, a0[2:0]});
+                remw      <= (job_weights ? weights_per_oc : lc_acc) + a0[2:0];
+                lo        <= a0[2:0];
                 dst0      <= {RF_AW{1'b0}} - a0[2:0];
             end else if (busy) begin
                 wr_en_q <= granted;
@@ -217,17 +217,22 @@ module load_generator #(
                     grp_fresh <= 1'b1;
                     if (!last_group) begin
                         g    <= g + 1'b1;
-                        rel0 <= rel0 + NUM_MACROS;
+                        remw <= remw - NUM_MACROS;
+                        lo   <= 3'd0;
                         dst0 <= dst0 + NUM_MACROS;
                     end else if (more_runs) begin
                         a_ptr   <= nx_a;
                         ch_ptr  <= nx_chptr;
                         d_ptr   <= nx_d;
                         ch_dst  <= nx_chdst;
-                        row_cnt <= nx_row;
-                        ch_cnt  <= nx_ch;
+                        if (more_rows) rows_left <= rows_left - 1'b1;
+                        else begin
+                            rows_left <= lrows_m1;
+                            ch_left   <= ch_left - 1'b1;
+                        end
                         g       <= nx_a[ADDR_WIDTH-1:3];
-                        rel0    <= -$signed({{(SW-3){1'b0}}, nx_a[2:0]});
+                        remw    <= run_len + nx_a[2:0];
+                        lo      <= nx_a[2:0];
                         dst0    <= nx_d - nx_a[2:0];
                     end else begin
                         busy <= 1'b0;
