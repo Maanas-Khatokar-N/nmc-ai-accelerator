@@ -104,10 +104,10 @@ module access_controller_tb;
         check("psum: read_en", ps_en, 16'hFFFF); check("psum: read_last", ps_last, 16'hFFFF);
         check("psum: mac blocked", mac_en, 0);
         // 9. psum lane invalid & active -> wait
-        psv = 16'hFFFF & ~(1 << 3); #1;
+        psv = 16'hFFFF & ~(1 << 3); @(negedge clk); #1;      // ps_ok is registered: one cycle
         check("psum wait: load", psum_load, 0); check("psum wait: read_en", ps_en, 0);
         // 10. that lane masked -> load proceeds
-        pe_mask = 16'hFFFF & ~(1 << 3); #1;
+        pe_mask = 16'hFFFF & ~(1 << 3); @(negedge clk); #1;
         check("psum masked: load", psum_load, 1); check("psum masked: read_en", ps_en, 16'hFFF7);
         psum_req = 0; pe_mask = {N{1'b1}}; psv = {N{1'b1}}; #1;
         check("psum off: mac resumes", mac_en, 1); check("psum off: no load", psum_load, 0);

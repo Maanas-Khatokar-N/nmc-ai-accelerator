@@ -92,7 +92,17 @@ module access_controller #(
     // COMPUTE / PSUM  (identical to the version that passes milestone 1)
     // ------------------------------------------------------------------
     wire if_ok   = &(ifrf_read_valid  | ~pe_mask);
-    wire ps_ok   = &(psrf_read_valid  | ~pe_mask);
+    // ps_ok is REGISTERED (one cycle old): the 16-input valid reduction used to sit in front of
+    // psum_fire -> pe_psum_load -> DSP OPMODE, the last critical path on the 7z020.
+    // Safe: the words can only become invalid by the load itself (psum_req drops the cycle after,
+    // so a stale 1 cannot fire twice) or by a flush of the other half; a stale 0 only delays the load.
+    // The first possible load is 2 cycles after compute_start (pe_clear cycle in between), by then
+    // ps_ok_q has seen the new tile's pe_mask, so cycle counts are unchanged.
+    reg  ps_ok_q;
+    always @(posedge clk or posedge rst)
+        if (rst) ps_ok_q <= 1'b0;
+        else     ps_ok_q <= &(psrf_read_valid | ~pe_mask);
+    wire ps_ok   = ps_ok_q;
     wire w_ok    = wrf_read_valid;
 
     wire mac_fire  = seq_valid & if_ok & w_ok & ~psum_req;
