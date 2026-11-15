@@ -52,7 +52,12 @@ module nmc_axi_wrapper #(
     // must match nmc_top
     parameter NUM_BANKS       = 4,
     parameter NUM_MACROS      = 8,
-    parameter DEPTH_PER_MACRO = 4096
+    parameter DEPTH_PER_MACRO = 4096,
+    // area options for 4 banks on the 7z020 (see rtl/cluster/nmc_cluster.v); defaults = full architecture
+    parameter IF_PP           = 1,
+    parameter W_PP            = 1,
+    parameter PERF_FULL       = 1,
+    parameter PP_BANKS        = 65535             // bit b = 1: bank b has a post-proc unit
 )(
     (* X_INTERFACE_INFO = "xilinx.com:signal:clock:1.0 aclk CLK" *)
     (* X_INTERFACE_PARAMETER = "ASSOCIATED_BUSIF s_axi_cfg:s_axi_mem, ASSOCIATED_RESET aresetn" *)
@@ -156,7 +161,8 @@ module nmc_axi_wrapper #(
     wire [31:0]         bus_wdata, bus_rdata;
 
     nmc_top #(
-        .NUM_BANKS(NUM_BANKS), .NUM_MACROS(NUM_MACROS), .DEPTH_PER_MACRO(DEPTH_PER_MACRO)
+        .NUM_BANKS(NUM_BANKS), .NUM_MACROS(NUM_MACROS), .DEPTH_PER_MACRO(DEPTH_PER_MACRO),
+        .IF_PP(IF_PP), .W_PP(W_PP), .PERF_FULL(PERF_FULL), .PP_BANKS(PP_BANKS)
     ) u_nmc (
         .clk(aclk), .rst(core_rst),
         .bus_req(bus_req), .bus_we(bus_we), .bus_addr(bus_addr), .bus_wdata(bus_wdata),

@@ -27,6 +27,10 @@ module nmc_top #(
     parameter NUM_MACROS      = 8,
     parameter DEPTH_PER_MACRO = 4096,
     parameter CNT_W           = 48,
+    parameter IF_PP           = 1,
+    parameter W_PP            = 1,
+    parameter PERF_FULL       = 1,
+    parameter PP_BANKS        = 65535,            // bit b = 1: bank b has a post-proc unit
     parameter MAX_OC          = 512,
     parameter MACRO_AW        = $clog2(DEPTH_PER_MACRO),
     parameter QA_W            = $clog2(MAX_OC),
@@ -105,7 +109,7 @@ module nmc_top #(
 
     nmc_cluster #(.NUM_BANKS(NUM_BANKS), .ADDR_WIDTH(ADDR_WIDTH), .DIM_WIDTH(DIM_WIDTH), .RF_AW(RF_AW),
                   .NUM_MACROS(NUM_MACROS), .DEPTH_PER_MACRO(DEPTH_PER_MACRO), .CNT_W(CNT_W),
-                  .MAX_OC(MAX_OC)) u_cluster (
+                  .MAX_OC(MAX_OC), .IF_PP(IF_PP), .W_PP(W_PP), .PERF_FULL(PERF_FULL), .PP_BANKS(PP_BANKS)) u_cluster (
         .clk(clk), .rst(rst),
         .core_req(core_req), .core_we(bus_we), .core_addr(core_addr), .core_wdata(bus_wdata),
         .core_rdata(core_rdata), .core_rvalid(core_rvalid),

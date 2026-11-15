@@ -37,6 +37,8 @@ module nmc_unit #(
     parameter NUM_PE     = PE_ROWS * PE_COLS,
     parameter LANE_W     = $clog2(NUM_PE),
     parameter CNT_W = 48,
+    parameter IF_PP = 1,                   // see address_generator: 0 = single IFMap RF half
+    parameter W_PP  = 1,                   //                       0 = single weight + psum RF half
     parameter [15:0] WIN_ALLOW = 16'd16,   // access window: open for WIN_ALLOW cycles ...
     parameter [15:0] WIN_BLOCK = 16'd0     // ... closed for WIN_BLOCK (0 = always open)
 )(
@@ -119,7 +121,7 @@ module nmc_unit #(
     address_generator #(
         .ADDR_WIDTH(ADDR_WIDTH), .DIM_WIDTH(DIM_WIDTH), .RF_AW(RF_AW),
         .NUM_MACROS(NUM_MACROS), .MACRO_AW(MACRO_AW),
-        .PE_ROWS(PE_ROWS), .PE_COLS(PE_COLS)
+        .PE_ROWS(PE_ROWS), .PE_COLS(PE_COLS), .IF_PP(IF_PP), .W_PP(W_PP)
     ) u_ag (
         .clk(clk), .rst(rst), .start(start), .done(done),
         .ifmap_cols(ifmap_cols), .kernel_rows(kernel_rows), .kernel_cols(kernel_cols),

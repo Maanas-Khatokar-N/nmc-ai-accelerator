@@ -44,7 +44,12 @@ module nmc_cluster #(
     parameter MAX_OC          = 512,
     parameter QA_W            = $clog2(MAX_OC),
     parameter BANK_W          = $clog2(NUM_BANKS),
-    parameter CORE_AW         = $clog2(NUM_MACROS) + MACRO_AW
+    parameter CORE_AW         = $clog2(NUM_MACROS) + MACRO_AW,
+    // FPGA area options (defaults = full architecture)
+    parameter IF_PP           = 1,                       // 0: single IFMap RF half per unit
+    parameter W_PP            = 1,                       // 0: single weight + psum RF half per unit
+    parameter PERF_FULL       = 1,                       // 0: only the cycle counter is kept (MAC / stall / blocked / ops read 0)
+    parameter PP_BANKS        = 65535                    // bit b = 1: bank b has a post-proc unit (others: pp round completes at once, no effect)
 )(
     input  wire                         clk,
     input  wire                         rst,
@@ -210,6 +215,7 @@ module nmc_cluster #(
         wire [NUM_MACROS*MACRO_AW-1:0] pu_addr;
         wire [NUM_MACROS*32-1:0]       pu_wdata;
         wire                           pu_busy;
+        wire [CNT_W-1:0]               u_pmac, u_pstall, u_pblk, u_pops;
 
         assign pp_busy[b] = pu_busy;
 
@@ -230,7 +236,8 @@ module nmc_cluster #(
             .nmc_rdata(nmc_rdata), .nmc_rvalid(nmc_rvalid));
 
         nmc_unit #(.ADDR_WIDTH(ADDR_WIDTH), .DIM_WIDTH(DIM_WIDTH), .RF_AW(RF_AW),
-                   .NUM_MACROS(NUM_MACROS), .MACRO_AW(MACRO_AW), .CNT_W(CNT_W)) u_unit (
+                   .NUM_MACROS(NUM_MACROS), .MACRO_AW(MACRO_AW), .CNT_W(CNT_W),
+                   .IF_PP(IF_PP), .W_PP(W_PP)) u_unit (
             .clk(clk), .rst(rst), .start(unit_start[b]), .done(unit_done[b]),
             .accumulate(accumulate[b]),
             .ifmap_cols      (ifmap_cols      [b*DIM_WIDTH  +: DIM_WIDTH ]),
@@ -258,31 +265,44 @@ module nmc_cluster #(
             .perf_cyc_load       (),
             .perf_cyc_compute    (),
             .perf_cyc_store      (),
-            .perf_cyc_mac        (perf_cyc_mac        [b*CNT_W +: CNT_W]),
-            .perf_cyc_stall      (perf_cyc_stall      [b*CNT_W +: CNT_W]),
-            .perf_cyc_mem_blocked(perf_cyc_mem_blocked[b*CNT_W +: CNT_W]),
-            .perf_mac_ops        (perf_mac_ops        [b*CNT_W +: CNT_W]));
+            .perf_cyc_mac        (u_pmac),
+            .perf_cyc_stall      (u_pstall),
+            .perf_cyc_mem_blocked(u_pblk),
+            .perf_mac_ops        (u_pops));
 
-        postproc_unit #(.ADDR_WIDTH(ADDR_WIDTH), .DIM_WIDTH(DIM_WIDTH),
-                        .NUM_MACROS(NUM_MACROS), .MACRO_AW(MACRO_AW), .MAX_OC(MAX_OC)) u_pp (
-            .clk(clk), .rst(rst), .start(pp_unit_start[b]), .done(pp_done[b]), .busy(pu_busy),
-            .mem_allow(1'b1),
-            .src_base   (pp_src_base   [b*ADDR_WIDTH +: ADDR_WIDTH]),
-            .dst_base   (pp_dst_base   [b*ADDR_WIDTH +: ADDR_WIDTH]),
-            .src_cols   (pp_src_cols   [b*DIM_WIDTH  +: DIM_WIDTH ]),
-            .out_rows   (pp_out_rows   [b*DIM_WIDTH  +: DIM_WIDTH ]),
-            .out_cols   (pp_out_cols   [b*DIM_WIDTH  +: DIM_WIDTH ]),
-            .channels   (pp_channels   [b*DIM_WIDTH  +: DIM_WIDTH ]),
-            .pool_k     (pp_pool_k     [b*DIM_WIDTH  +: DIM_WIDTH ]),
-            .src_ch_size(pp_src_ch_size[b*ADDR_WIDTH +: ADDR_WIDTH]),
-            .row_step   (pp_row_step   [b*ADDR_WIDTH +: ADDR_WIDTH]),
-            .total_out  (pp_total_out  [b*ADDR_WIDTH +: ADDR_WIDTH]),
-            .out_zp     (pp_out_zp     [b*8 +: 8]),
-            .relu_en    (pp_relu_en[b]),
-            .qp_we(pp_qp_we[b]), .qp_waddr(pp_qp_waddr), .qp_bias(pp_qp_bias),
-            .qp_mult(pp_qp_mult), .qp_shift(pp_qp_shift),
-            .nmc_req(pu_req), .nmc_we(pu_we), .nmc_addr(pu_addr), .nmc_wdata(pu_wdata),
-            .nmc_grant(nmc_grant), .nmc_rdata(nmc_rdata));
+        // PERF_FULL = 0: the extra counters are tied off here and disappear in synthesis
+        assign perf_cyc_mac        [b*CNT_W +: CNT_W] = PERF_FULL ? u_pmac   : {CNT_W{1'b0}};
+        assign perf_cyc_stall      [b*CNT_W +: CNT_W] = PERF_FULL ? u_pstall : {CNT_W{1'b0}};
+        assign perf_cyc_mem_blocked[b*CNT_W +: CNT_W] = PERF_FULL ? u_pblk   : {CNT_W{1'b0}};
+        assign perf_mac_ops        [b*CNT_W +: CNT_W] = PERF_FULL ? u_pops   : {CNT_W{1'b0}};
+
+        if ((PP_BANKS >> b) & 1) begin : g_pp
+            postproc_unit #(.ADDR_WIDTH(ADDR_WIDTH), .DIM_WIDTH(DIM_WIDTH),
+                            .NUM_MACROS(NUM_MACROS), .MACRO_AW(MACRO_AW), .MAX_OC(MAX_OC)) u_pp (
+                .clk(clk), .rst(rst), .start(pp_unit_start[b]), .done(pp_done[b]), .busy(pu_busy),
+                .mem_allow(1'b1),
+                .src_base   (pp_src_base   [b*ADDR_WIDTH +: ADDR_WIDTH]),
+                .dst_base   (pp_dst_base   [b*ADDR_WIDTH +: ADDR_WIDTH]),
+                .src_cols   (pp_src_cols   [b*DIM_WIDTH  +: DIM_WIDTH ]),
+                .out_rows   (pp_out_rows   [b*DIM_WIDTH  +: DIM_WIDTH ]),
+                .out_cols   (pp_out_cols   [b*DIM_WIDTH  +: DIM_WIDTH ]),
+                .channels   (pp_channels   [b*DIM_WIDTH  +: DIM_WIDTH ]),
+                .pool_k     (pp_pool_k     [b*DIM_WIDTH  +: DIM_WIDTH ]),
+                .src_ch_size(pp_src_ch_size[b*ADDR_WIDTH +: ADDR_WIDTH]),
+                .row_step   (pp_row_step   [b*ADDR_WIDTH +: ADDR_WIDTH]),
+                .total_out  (pp_total_out  [b*ADDR_WIDTH +: ADDR_WIDTH]),
+                .out_zp     (pp_out_zp     [b*8 +: 8]),
+                .relu_en    (pp_relu_en[b]),
+                .qp_we(pp_qp_we[b]), .qp_waddr(pp_qp_waddr), .qp_bias(pp_qp_bias),
+                .qp_mult(pp_qp_mult), .qp_shift(pp_qp_shift),
+                .nmc_req(pu_req), .nmc_we(pu_we), .nmc_addr(pu_addr), .nmc_wdata(pu_wdata),
+                .nmc_grant(nmc_grant), .nmc_rdata(nmc_rdata));
+        end else begin : g_nopp
+            assign pu_req = {NUM_MACROS{1'b0}}; assign pu_we = {NUM_MACROS{1'b0}};
+            assign pu_addr = {(NUM_MACROS*MACRO_AW){1'b0}}; assign pu_wdata = {(NUM_MACROS*32){1'b0}};
+            assign pu_busy = 1'b0;
+            assign pp_done[b] = pp_unit_start[b];            // nothing to do: report done immediately
+        end
     end endgenerate
 
 endmodule

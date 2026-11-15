@@ -82,7 +82,14 @@ module address_generator #(
     parameter PE_ROWS    = 4,
     parameter PE_COLS    = 4,
     parameter NUM_PE     = PE_ROWS * PE_COLS,
-    parameter LANE_W     = $clog2(NUM_PE)
+    parameter LANE_W     = $clog2(NUM_PE),
+    // FPGA area options (defaults = paper architecture, ping-pong):
+    //   IF_PP = 0 : ONE IFMap RF half. The loader refills it only after compute released it (if_full handshake
+    //               already enforces this), so loading no longer overlaps compute. Saves ~half of the IFMap RF.
+    //   W_PP  = 0 : ONE weight RF half and ONE psum RF half (they share the selects). Weight / psum loading no longer
+    //               overlaps the compute of the previous output channel.
+    parameter IF_PP = 1,
+    parameter W_PP  = 1
 )(
     input  wire clk,
     input  wire rst,
@@ -371,13 +378,13 @@ module address_generator #(
     // RF half selects / flushes (the psum RF shares the weight RF's selects)
     // ------------------------------------------------------------------
     assign ifrf_flush     = (lstate == L_IF_FLUSH);
-    assign ifrf_flush_sel = ld_ifb;
-    assign ifrf_wr_sel    = ld_ifb;
-    assign ifrf_rd_sel    = cp_ifb;
+    assign ifrf_flush_sel = (IF_PP != 0) ? ld_ifb : 1'b0;
+    assign ifrf_wr_sel    = (IF_PP != 0) ? ld_ifb : 1'b0;
+    assign ifrf_rd_sel    = (IF_PP != 0) ? cp_ifb : 1'b0;
     assign wrf_flush      = (lstate == L_W_FLUSH);
-    assign wrf_flush_sel  = ld_wb;
-    assign wrf_wr_sel     = ld_wb;
-    assign wrf_rd_sel     = cp_wb;
+    assign wrf_flush_sel  = (W_PP != 0) ? ld_wb : 1'b0;
+    assign wrf_wr_sel     = (W_PP != 0) ? ld_wb : 1'b0;
+    assign wrf_rd_sel     = (W_PP != 0) ? cp_wb : 1'b0;
 
     // perf phases (they now OVERLAP, so load+compute+store can exceed total)
     assign ph_load    = (lstate == L_LDP_GO) || (lstate == L_LDP_WAIT) ||
@@ -438,7 +445,7 @@ module address_generator #(
                 L_LDW_WAIT: if (ld_done) begin
                     if (accumulate) lstate <= L_LDS_GO;      // weights in, now the psums
                     else begin
-                        ld_wb  <= ~ld_wb;
+                        ld_wb  <= (W_PP != 0) ? ~ld_wb : 1'b0;
                         lstate <= L_NEXT_OC;
                     end
                 end
@@ -446,7 +453,7 @@ module address_generator #(
                 // psum reload for (tile, oc) into the psum RF half that was flushed with the weights
                 L_LDS_GO:   lstate <= L_LDS_WAIT;
                 L_LDS_WAIT: if (rl_done) begin
-                    ld_wb  <= ~ld_wb;
+                    ld_wb  <= (W_PP != 0) ? ~ld_wb : 1'b0;
                     lstate <= L_NEXT_OC;
                 end
 
@@ -457,7 +464,7 @@ module address_generator #(
                         ld_of_ptr <= rl_addr_now + ofmap_ch_size;
                         lstate    <= L_WAIT_W;
                     end else begin
-                        ld_ifb <= ~ld_ifb;
+                        ld_ifb <= (IF_PP != 0) ? ~ld_ifb : 1'b0;
                         lstate <= L_CHECK;
                     end
                 end
@@ -505,10 +512,10 @@ module address_generator #(
                 // accumulators stay put until the shadow is free; capture + store start + release
                 C_CAP: if (!sh_full) begin
                     cp_of_ptr <= st_addr_now + ofmap_ch_size;
-                    cp_wb     <= ~cp_wb;
+                    cp_wb     <= (W_PP != 0) ? ~cp_wb : 1'b0;
                     if (cmp_oc_last) begin
                         cmp_oc <= 0;
-                        cp_ifb <= ~cp_ifb;
+                        cp_ifb <= (IF_PP != 0) ? ~cp_ifb : 1'b0;
                         cstate <= no_more_tiles ? C_FIN : C_WAIT;
                     end else begin
                         cmp_oc <= cmp_oc + 1'b1;
