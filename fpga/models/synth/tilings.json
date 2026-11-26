@@ -1,0 +1,45 @@
+{
+ "banks": 2,
+ "layers": {
+  "conv1_1": {
+   "n_if": 2,
+   "tc": 1,
+   "tk": 1,
+   "policy": "spatial",
+   "est_cycles": 6912,
+   "host_words": 12512
+  },
+  "conv1_2": {
+   "n_if": 2,
+   "tc": 1,
+   "tk": 1,
+   "policy": "spatial",
+   "est_cycles": 18432,
+   "host_words": 20864
+  },
+  "conv2_1": {
+   "n_if": 1,
+   "tc": 1,
+   "tk": 2,
+   "policy": "kernel",
+   "est_cycles": 9216,
+   "host_words": 10432
+  },
+  "conv2_2": {
+   "n_if": 1,
+   "tc": 1,
+   "tk": 2,
+   "policy": "kernel",
+   "est_cycles": 18432,
+   "host_words": 16768
+  },
+  "conv3_1": {
+   "n_if": 1,
+   "tc": 1,
+   "tk": 2,
+   "policy": "kernel",
+   "est_cycles": 4608,
+   "host_words": 6528
+  }
+ }
+}

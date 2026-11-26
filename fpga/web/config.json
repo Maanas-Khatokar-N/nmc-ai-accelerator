@@ -1,0 +1,80 @@
+{
+  "title": "NMC Accelerator",
+  "port": 8080,
+  "demo": false,
+  "workdir": "/home/xilinx/jupyter_notebooks/nmc_accelerator",
+  "bringup_cmd": "sudo -E python3 pynq_bringup.py --bit nmc.bit --banks 4 --pp-mask 3 --no-perf-check",
+  "bringup_once": true,
+  "bringup_timeout": 300,
+  "run_cmd": "sudo -E python3 pynq_run_network.py --bit nmc.bit --banks 4 --model models/vgg16 --tilings models/vgg16/tilings.json --image {image} --classes models/vgg16/classes.txt",
+  "run_timeout": 900,
+  "result_json": "",
+  "highlights": [
+    {
+      "label": "Throughput (compute only)",
+      "regex": "([\\d\\.]+) GOPS",
+      "unit": "GOPS"
+    },
+    {
+      "label": "NMC compute cycles",
+      "regex": "NMC compute (\\d+) cycles",
+      "unit": "cycles"
+    },
+    {
+      "label": "NMC compute time",
+      "regex": "cycles = ([\\d\\.]+) s at",
+      "unit": "s"
+    },
+    {
+      "label": "Accelerator clock",
+      "regex": " s at ([\\d\\.]+) MHz",
+      "unit": "MHz"
+    },
+    {
+      "label": "MACs",
+      "regex": "\\((\\d+) MACs",
+      "unit": ""
+    },
+    {
+      "label": "Host load",
+      "regex": "host:.*?load ([\\d\\.]+) s",
+      "unit": "s"
+    },
+    {
+      "label": "Host run",
+      "regex": "host:.*?\\brun ([\\d\\.]+) s",
+      "unit": "s"
+    },
+    {
+      "label": "Host drain",
+      "regex": "drain ([\\d\\.]+) s",
+      "unit": "s"
+    },
+    {
+      "label": "Requant / pool / FC (ARM)",
+      "regex": "requant/pool/fc ([\\d\\.]+) s",
+      "unit": "s"
+    },
+    {
+      "label": "Script wall time",
+      "regex": ";\\s+wall ([\\d\\.]+) s",
+      "unit": "s"
+    }
+  ],
+  "prediction_regex": "^\\s*\\d+[\\.\\)]\\s+(.+?)\\s{2,}([\\d\\.]+)\\s*%.*$",
+  "stage_markers": [
+    {
+      "regex": "load",
+      "phase": "load"
+    },
+    {
+      "regex": "conv|comput|mac",
+      "phase": "compute"
+    },
+    {
+      "regex": "stor|drain|writeback",
+      "phase": "store"
+    }
+  ],
+  "verdict_regex": "NETWORK RUN (\\w+)"
+}

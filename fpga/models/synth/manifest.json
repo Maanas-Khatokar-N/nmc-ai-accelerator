@@ -1,0 +1,99 @@
+{
+ "input": {
+  "shape": [
+   3,
+   32,
+   32
+  ],
+  "x_scale": 0.034695696643018345
+ },
+ "layers": [
+  {
+   "type": "conv",
+   "name": "conv1_1",
+   "relu": 1,
+   "pad": 1,
+   "pool": 1,
+   "cin": 3,
+   "cout": 8,
+   "w": "L00_conv1_1_w.npy",
+   "bias": "L00_conv1_1_bias.npy",
+   "mult": "L00_conv1_1_mult.npy",
+   "shift": "L00_conv1_1_shift.npy"
+  },
+  {
+   "type": "conv",
+   "name": "conv1_2",
+   "relu": 1,
+   "pad": 1,
+   "pool": 2,
+   "cin": 8,
+   "cout": 8,
+   "w": "L01_conv1_2_w.npy",
+   "bias": "L01_conv1_2_bias.npy",
+   "mult": "L01_conv1_2_mult.npy",
+   "shift": "L01_conv1_2_shift.npy"
+  },
+  {
+   "type": "conv",
+   "name": "conv2_1",
+   "relu": 1,
+   "pad": 1,
+   "pool": 1,
+   "cin": 8,
+   "cout": 16,
+   "w": "L02_conv2_1_w.npy",
+   "bias": "L02_conv2_1_bias.npy",
+   "mult": "L02_conv2_1_mult.npy",
+   "shift": "L02_conv2_1_shift.npy"
+  },
+  {
+   "type": "conv",
+   "name": "conv2_2",
+   "relu": 1,
+   "pad": 1,
+   "pool": 2,
+   "cin": 16,
+   "cout": 16,
+   "w": "L03_conv2_2_w.npy",
+   "bias": "L03_conv2_2_bias.npy",
+   "mult": "L03_conv2_2_mult.npy",
+   "shift": "L03_conv2_2_shift.npy"
+  },
+  {
+   "type": "conv",
+   "name": "conv3_1",
+   "relu": 1,
+   "pad": 1,
+   "pool": 2,
+   "cin": 16,
+   "cout": 16,
+   "w": "L04_conv3_1_w.npy",
+   "bias": "L04_conv3_1_bias.npy",
+   "mult": "L04_conv3_1_mult.npy",
+   "shift": "L04_conv3_1_shift.npy"
+  },
+  {
+   "type": "fc",
+   "name": "fc6",
+   "relu": 1,
+   "nin": 256,
+   "nout": 32,
+   "w": "L05_fc6_w.npy",
+   "bias": "L05_fc6_bias.npy",
+   "mult": "L05_fc6_mult.npy",
+   "shift": "L05_fc6_shift.npy"
+  },
+  {
+   "type": "fc",
+   "name": "fc7",
+   "relu": 0,
+   "nin": 32,
+   "nout": 10,
+   "final": 1,
+   "w": "L06_fc7_w.npy",
+   "bias": "L06_fc7_bias.npy",
+   "scale": "L06_fc7_scale.npy"
+  }
+ ]
+}

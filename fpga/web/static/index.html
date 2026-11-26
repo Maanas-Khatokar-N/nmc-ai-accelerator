@@ -1,0 +1,382 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NMC Accelerator</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#080c17; --panel:#0e1425; --panel2:#131b33; --line:#1d2745; --line2:#2b3a63;
+  --text:#e2e8f7; --mute:#8391b4; --cyan:#58d6ee; --copper:#f2a65a; --ok:#6fe3b0; --bad:#ff6f7d;
+  --sans:"Space Grotesk",ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;
+  --mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  color-scheme:dark;
+}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--text);font-family:var(--sans);font-size:15px;line-height:1.5}
+body{background:
+  radial-gradient(900px 500px at 78% -10%,rgba(88,214,238,.09),transparent 60%),
+  radial-gradient(700px 500px at -5% 30%,rgba(242,166,90,.06),transparent 60%),var(--bg);min-height:100vh}
+button{font:inherit;color:inherit;cursor:pointer}
+:focus-visible{outline:2px solid var(--cyan);outline-offset:2px}
+.wrap{max-width:1240px;margin:0 auto;padding:0 28px 80px}
+
+header{display:flex;align-items:center;justify-content:space-between;padding:22px 0;gap:16px;flex-wrap:wrap}
+.brand{display:flex;align-items:center;gap:12px}
+.brand h1{font-size:19px;margin:0;font-weight:600;letter-spacing:.2px}
+.brand small{display:block;color:var(--mute);font-size:12.5px;margin-top:-2px}
+.pill{display:flex;align-items:center;gap:9px;padding:7px 14px;border:1px solid var(--line);border-radius:999px;background:var(--panel);font-size:13px;color:var(--mute)}
+.pill b{color:var(--text);font-weight:500;font-family:var(--mono);font-size:12.5px}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--ok);box-shadow:0 0 10px var(--ok)}
+.dot.off{background:var(--bad);box-shadow:0 0 10px var(--bad)}
+.dot.busy{background:var(--copper);box-shadow:0 0 10px var(--copper)}
+
+.stage{display:grid;grid-template-columns:minmax(320px,400px) 1fr;gap:28px;align-items:start}
+@media(max-width:980px){.stage{grid-template-columns:1fr}}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:20px}
+.card h2{font-size:14px;font-weight:600;margin:0 0 14px;color:var(--mute);letter-spacing:.3px}
+
+#drop{border:1.5px dashed var(--line2);border-radius:12px;padding:26px 16px;text-align:center;background:var(--panel2);transition:border-color .15s,background .15s;cursor:pointer;display:block;width:100%}
+#drop:hover,#drop.over{border-color:var(--cyan);background:#16213f}
+#drop svg{width:34px;height:34px;color:var(--cyan);margin-bottom:6px}
+#drop p{margin:0;color:var(--mute);font-size:14px}
+#drop p b{color:var(--text);font-weight:500}
+#preview{display:none;align-items:center;gap:14px;text-align:left}
+#preview img{width:84px;height:84px;object-fit:cover;border-radius:10px;border:1px solid var(--line2)}
+#preview .nm{font-weight:500;word-break:break-all}
+#preview .sz{color:var(--mute);font-size:13px;font-family:var(--mono)}
+#preview .chg{color:var(--cyan);font-size:13px;margin-top:4px}
+
+#run{margin-top:16px;width:100%;padding:14px;border:0;border-radius:12px;background:var(--copper);color:#1b1206;font-weight:700;font-size:16px;letter-spacing:.2px;transition:transform .1s,filter .15s}
+#run:hover:not(:disabled){filter:brightness(1.08)}
+#run:active:not(:disabled){transform:translateY(1px)}
+#run:disabled{background:#2a3250;color:#6c7899;cursor:not-allowed}
+.linkbtn{background:none;border:0;color:var(--mute);font-size:13px;padding:10px 0 0;text-decoration:underline;text-underline-offset:3px}
+.linkbtn:hover:not(:disabled){color:var(--text)}
+.linkbtn:disabled{opacity:.4;cursor:not-allowed}
+#msg{margin-top:12px;font-size:13.5px;color:var(--bad);min-height:1px}
+
+.steps{list-style:none;margin:0;padding:0;position:relative}
+.steps li{display:flex;gap:14px;align-items:flex-start;padding:0 0 18px;position:relative;color:var(--mute)}
+.steps li:last-child{padding-bottom:0}
+.steps li::before{content:"";position:absolute;left:11px;top:24px;bottom:0;width:2px;background:var(--line)}
+.steps li:last-child::before{display:none}
+.steps .ic{width:24px;height:24px;border-radius:50%;border:2px solid var(--line2);flex:none;display:grid;place-items:center;font-size:12px;background:var(--panel)}
+.steps .tx b{display:block;font-weight:500;color:inherit}
+.steps .tx span{font-size:12.5px;color:var(--mute)}
+.steps li.active{color:var(--text)}
+.steps li.active .ic{border-color:var(--copper);box-shadow:0 0 0 4px rgba(242,166,90,.15);animation:ring 1.4s ease-in-out infinite}
+.steps li.done{color:var(--text)}
+.steps li.done .ic{border-color:var(--cyan);background:var(--cyan);color:#06222a}
+.steps li.done::before{background:var(--cyan)}
+.steps li.err .ic{border-color:var(--bad);background:var(--bad);color:#2b0610}
+@keyframes ring{50%{box-shadow:0 0 0 7px rgba(242,166,90,0)}}
+
+.chipbox{position:relative;border:1px solid var(--line);border-radius:20px;padding:10px;background:
+  linear-gradient(rgba(88,214,238,.035) 1px,transparent 1px) 0 0/28px 28px,
+  linear-gradient(90deg,rgba(88,214,238,.035) 1px,transparent 1px) 0 0/28px 28px,var(--panel)}
+.chipbox svg{width:100%;height:auto;display:block}
+.caption{position:absolute;left:22px;bottom:18px;display:flex;align-items:center;gap:10px;font-size:13px;color:var(--mute);background:rgba(8,12,23,.78);padding:6px 12px;border-radius:999px;border:1px solid var(--line)}
+.caption b{color:var(--text);font-weight:500}
+
+/* chip drawing */
+.pkg{fill:#0b1121;stroke:#25314f}
+.pin{fill:#1a2545}
+.die{fill:#090e1d;stroke:#2d3b63}
+.blk{fill:#101a33;stroke:#2d3b63}
+.host{fill:#141f3d;stroke:#3a4c80}
+.lbl{fill:#8fa0c8;font:500 11px var(--sans)}
+.lbl.big{font-size:13px;fill:#c9d4ef}
+.macro{fill:#18274b;stroke:#2c3d6a;stroke-width:.8}
+.pe{fill:#1b2c52;stroke:#34487a;stroke-width:.8}
+.trace{fill:none;stroke:#2c3d6a;stroke-width:2;stroke-linecap:round}
+.trace.hot{stroke:var(--copper);stroke-dasharray:3 7;opacity:0}
+svg.boot .host{stroke:var(--copper);filter:drop-shadow(0 0 8px rgba(242,166,90,.5))}
+svg.boot .trace.hot,svg.load .trace.hot,svg.store .trace.hot{opacity:1;animation:flow .8s linear infinite}
+svg.store .trace.hot{animation-direction:reverse}
+svg.load .macro{animation:mblink 1.1s ease-in-out infinite;animation-delay:var(--d)}
+svg.store .macro{animation:mblink 1.1s ease-in-out infinite;animation-delay:var(--d)}
+svg.compute .pe{animation:pulse 1.2s ease-in-out infinite;animation-delay:var(--d)}
+svg.done .pe,svg.done .macro{fill:#12404a;stroke:var(--cyan)}
+svg.done .host{stroke:var(--cyan);filter:drop-shadow(0 0 8px rgba(88,214,238,.45))}
+svg.done .trace{stroke:#2a7f90}
+svg.error .die{stroke:var(--bad)}
+@keyframes flow{to{stroke-dashoffset:-20}}
+@keyframes pulse{0%,100%{fill:#1b2c52;stroke:#34487a}45%{fill:#f2a65a;stroke:#ffd29b}}
+@keyframes mblink{0%,100%{fill:#18274b}50%{fill:#2c8aa0}}
+@media(prefers-reduced-motion:reduce){*{animation:none!important}}
+
+/* results */
+#results{margin-top:28px;display:none}
+.head{display:grid;grid-template-columns:1.3fr 1fr;gap:28px}
+@media(max-width:980px){.head{grid-template-columns:1fr}}
+.top1{font-size:clamp(28px,4vw,44px);font-weight:700;line-height:1.1;margin:2px 0 10px}
+.conf{display:flex;align-items:center;gap:12px;font-family:var(--mono);color:var(--mute)}
+.conf b{color:var(--cyan);font-size:18px;font-weight:500}
+.bar{flex:1;height:8px;background:var(--panel2);border-radius:99px;overflow:hidden}
+.bar i{display:block;height:100%;background:linear-gradient(90deg,var(--cyan),#8be8f7);border-radius:99px;transition:width .7s cubic-bezier(.2,.8,.2,1)}
+.preds{display:grid;gap:9px;margin-top:2px}
+.preds .r{display:grid;grid-template-columns:1fr 54px;gap:4px 10px;align-items:center;font-size:14px}
+.preds .r .bar{grid-column:1/-1;height:5px}
+.preds .r span:last-child{text-align:right;font-family:var(--mono);color:var(--mute);font-size:13px}
+.tiles{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:14px;margin-top:20px}
+.tile{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:16px 18px}
+.tile .k{color:var(--mute);font-size:13px}
+.tile .v{overflow-wrap:anywhere;font-family:var(--mono);font-size:26px;font-weight:500;margin-top:2px;letter-spacing:-.5px}
+.tile .v small{font-size:13px;color:var(--mute);margin-left:6px;font-weight:400;letter-spacing:0}
+.acts{display:flex;gap:10px;align-items:center;margin-top:18px;flex-wrap:wrap}
+.btn2{border:1px solid var(--line2);background:var(--panel);padding:9px 16px;border-radius:10px;font-size:14px}
+.btn2:hover{border-color:var(--cyan)}
+#more{display:none;margin-top:16px}
+table{width:100%;border-collapse:collapse;font-size:13.5px}
+td{padding:8px 4px;border-bottom:1px solid var(--line)}
+td:first-child{color:var(--mute);width:48%}
+td:last-child{font-family:var(--mono);text-align:right}
+.lt td,.lt th{text-align:right;font-family:var(--mono);padding:7px 6px;border-bottom:1px solid var(--line)}
+.lt td:first-child,.lt th:first-child{text-align:left;width:auto;color:var(--text)}
+.lt th{color:var(--mute);font-weight:500}
+.lt{margin-top:6px;display:block;overflow-x:auto}
+.ok{color:var(--ok)}.bad{color:var(--bad)}
+.banner{display:inline-block;margin-bottom:12px;padding:4px 12px;border-radius:99px;font-size:12.5px;background:rgba(242,166,90,.12);color:var(--copper);border:1px solid rgba(242,166,90,.35)}
+details.con{margin-top:22px;background:var(--panel);border:1px solid var(--line);border-radius:14px}
+details.con summary{padding:14px 18px;cursor:pointer;color:var(--mute);font-weight:500}
+#log{margin:0;padding:6px 18px 18px;max-height:340px;overflow:auto;font:12.5px/1.6 var(--mono);color:#aebbd9;white-space:pre-wrap;word-break:break-word}
+#log .cmd{color:var(--copper)} #log .sys{color:var(--bad)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="brand">
+      <svg width="38" height="38" viewBox="0 0 38 38" aria-hidden="true"><rect x="8" y="8" width="22" height="22" rx="4" fill="#101a33" stroke="#58d6ee" stroke-width="1.6"/><rect x="14" y="14" width="10" height="10" rx="2" fill="#f2a65a"/><g stroke="#58d6ee" stroke-width="1.6" stroke-linecap="round"><path d="M13 4v4M19 4v4M25 4v4M13 30v4M19 30v4M25 30v4M4 13h4M4 19h4M4 25h4M30 13h4M30 19h4M30 25h4"/></g></svg>
+      <div><h1 id="title">NMC Accelerator</h1><small>Near-memory computing on FPGA</small></div>
+    </div>
+    <div class="pill"><span class="dot" id="dot"></span><span id="board">connecting…</span></div>
+  </header>
+
+  <div class="stage">
+    <div style="display:grid;gap:20px">
+      <div class="card">
+        <h2>Input image</h2>
+        <label id="drop" for="file" tabindex="0">
+          <div id="empty">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V4m0 0L7 9m5-5 5 5"/><path d="M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3"/></svg>
+            <p><b>Drop an image</b> or click to browse</p>
+            <p style="font-size:12.5px;margin-top:2px">JPG or PNG</p>
+          </div>
+          <div id="preview"><img id="thumb" alt="Selected image"><div><div class="nm" id="fname"></div><div class="sz" id="fsize"></div><div class="chg">Change image</div></div></div>
+        </label>
+        <input id="file" type="file" accept="image/jpeg,image/png" hidden>
+        <button id="run" disabled>Run on accelerator</button>
+        <div id="msg" role="alert"></div>
+        <button class="linkbtn" id="reinit">Re-initialise board</button>
+      </div>
+      <div class="card">
+        <h2>Progress</h2>
+        <ul class="steps" id="steps"></ul>
+      </div>
+    </div>
+
+    <div class="chipbox">
+      <svg id="chip" viewBox="0 0 760 560" role="img" aria-label="Diagram of the NMC accelerator: a RISC-V host connected to four SRAM banks, each with a near-memory compute unit"></svg>
+      <div class="caption"><span class="dot" id="cdot"></span><span id="cap">Idle. Choose an image to begin.</span></div>
+    </div>
+  </div>
+
+  <section id="results" aria-live="polite">
+    <div class="head">
+      <div class="card">
+        <div id="demoBanner" class="banner" style="display:none">Demo data. Set "demo": false in config.json to use the board.</div>
+        <h2 id="rh">Result</h2>
+        <div class="top1" id="top1">—</div>
+        <div class="conf" id="conf"></div>
+      </div>
+      <div class="card"><h2>Top predictions</h2><div class="preds" id="preds"></div></div>
+    </div>
+    <div class="tiles" id="tiles"></div>
+    <div class="acts">
+      <button class="btn2" id="toggle">Show full performance details</button>
+      <button class="btn2" id="dl">Download results (JSON)</button>
+    </div>
+    <div class="card" id="more"><h2>Per-layer breakdown</h2><table class="lt" id="ltable"></table><h2 style="margin-top:22px">All parsed values</h2><table id="dtable"></table></div>
+  </section>
+
+  <details class="con" id="con">
+    <summary>Console output</summary>
+    <pre id="log"></pre>
+  </details>
+</div>
+
+<script>
+const $=s=>document.querySelector(s), NS="http://www.w3.org/2000/svg";
+const el=(t,c,x)=>{const e=document.createElement(t);if(c)e.className=c;if(x!=null)e.textContent=x;return e};
+const sv=(t,a,p)=>{const e=document.createElementNS(NS,t);for(const k in a)e.setAttribute(k,a[k]);if(p)p.appendChild(e);return e};
+
+/* ---------- chip graphic ---------- */
+(function(){
+  const c=$("#chip");
+  sv("rect",{class:"pkg",x:20,y:20,width:720,height:520,rx:30},c);
+  for(let i=0;i<30;i++){const x=70+i*21;sv("rect",{class:"pin",x,y:6,width:8,height:15,rx:2},c);sv("rect",{class:"pin",x,y:539,width:8,height:15,rx:2},c)}
+  for(let i=0;i<21;i++){const y=64+i*21;sv("rect",{class:"pin",x:6,y,width:15,height:8,rx:2},c);sv("rect",{class:"pin",x:739,y,width:15,height:8,rx:2},c)}
+  sv("rect",{class:"die",x:80,y:80,width:600,height:400,rx:14},c);
+  // host
+  sv("rect",{class:"host",x:280,y:98,width:200,height:56,rx:10},c);
+  sv("text",{class:"lbl big",x:380,y:122,"text-anchor":"middle"},c).textContent="RISC-V host";
+  sv("text",{class:"lbl",x:380,y:139,"text-anchor":"middle"},c).textContent="control + interrupt";
+  // bus
+  sv("path",{class:"trace",d:"M380 154V184M125 184H635"},c);
+  sv("path",{class:"trace hot",d:"M380 154V184M125 184H635"},c);
+  const pos=[[105,210],[390,210],[105,345],[390,345]];
+  pos.forEach(([x,y],i)=>{
+    const cx=x+137;
+    if(y===210){sv("path",{class:"trace",d:`M${cx} 184V${y}`},c);sv("path",{class:"trace hot",d:`M${cx} 184V${y}`},c)}
+    else{sv("path",{class:"trace",d:`M${i===2?95:675} 184V${y+60}H${x<200?105:665}`},c)}
+    const g=sv("g",{transform:`translate(${x},${y})`},c);
+    sv("rect",{class:"blk",x:0,y:0,width:275,height:120,rx:10},g);
+    sv("text",{class:"lbl big",x:12,y:18},g).textContent="Bank "+i;
+    for(let m=0;m<8;m++){
+      sv("rect",{class:"macro",x:12+(m%2)*40,y:30+Math.floor(m/2)*20,width:34,height:15,rx:3,style:`--d:${m*90}ms`},g);
+    }
+    sv("text",{class:"lbl",x:12,y:116},g).textContent="8 SRAM macros";
+    sv("path",{class:"trace",d:"M96 62H150"},g);sv("path",{class:"trace hot",d:"M96 62H150"},g);
+    sv("rect",{class:"blk",x:140,y:26,width:122,height:90,rx:8,style:"fill:#0c1530"},g);
+    sv("text",{class:"lbl",x:150,y:42},g).textContent="NMC unit · 16 PEs";
+    for(let r=0;r<4;r++)for(let q=0;q<4;q++){
+      sv("rect",{class:"pe",x:150+q*24,y:50+r*15,width:20,height:11,rx:2.5,style:`--d:${(r+q)*110}ms`},g);
+    }
+  });
+})();
+
+/* ---------- state ---------- */
+let file=null, since=0, runId=-1, lastRendered=-1, lastResult=null, cycle=null, cyc=0;
+const STEPS=[["Image","Choose a picture to classify"],["Board bring-up","Load the accelerator on the FPGA"],["Accelerator run","Convolutions run next to the memory"],["Results","Prediction and performance"]];
+const stepsEl=$("#steps");
+STEPS.forEach(([t,s])=>{const li=el("li");li.append(el("div","ic"),(()=>{const d=el("div","tx");d.append(el("b",null,t),el("span",null,s));return d})());stepsEl.append(li)});
+
+function setSteps(st){ // st: array of 'done'|'active'|'err'|''
+  [...stepsEl.children].forEach((li,i)=>{li.className=st[i]||"";li.querySelector(".ic").textContent=st[i]==="done"?"✓":st[i]==="err"?"!":""});
+}
+function setChip(cls,cap,busy){
+  $("#chip").setAttribute("class",cls);$("#cap").textContent=cap;
+  $("#cdot").className="dot"+(busy?" busy":"");
+}
+
+/* ---------- file handling ---------- */
+const drop=$("#drop");
+function pick(f){
+  if(!f)return; if(!/^image\/(jpeg|png)$/.test(f.type)){showMsg("Please choose a JPG or PNG image.");return}
+  file=f;showMsg("");
+  $("#thumb").src=URL.createObjectURL(f);$("#fname").textContent=f.name;
+  $("#fsize").textContent=(f.size/1024).toFixed(0)+" KB";
+  $("#empty").style.display="none";$("#preview").style.display="flex";
+  refreshUI(lastStatus);
+}
+$("#file").onchange=e=>pick(e.target.files[0]);
+["dragenter","dragover"].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.add("over")}));
+["dragleave","drop"].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.remove("over")}));
+drop.addEventListener("drop",e=>pick(e.dataTransfer.files[0]));
+drop.addEventListener("keydown",e=>{if(e.key==="Enter"||e.key===" "){e.preventDefault();$("#file").click()}});
+function showMsg(t){$("#msg").textContent=t}
+
+$("#run").onclick=async()=>{
+  if(!file)return; showMsg("");
+  const r=await fetch("/api/run",{method:"POST",headers:{"X-Filename":file.name},body:file});
+  const d=await r.json(); if(!r.ok)showMsg(d.error||"Could not start the run.");
+  else {$("#con").open=true;poll(true)}
+};
+$("#reinit").onclick=async()=>{
+  const r=await fetch("/api/bringup",{method:"POST",body:"{}",headers:{"Content-Type":"application/json"}});
+  if(!r.ok)showMsg((await r.json()).error); else poll(true);
+};
+$("#toggle").onclick=()=>{const m=$("#more"),on=m.style.display==="block";m.style.display=on?"none":"block";$("#toggle").textContent=on?"Show full performance details":"Hide full performance details"};
+$("#dl").onclick=()=>{
+  const a=el("a");a.href=URL.createObjectURL(new Blob([JSON.stringify(lastResult,null,2)],{type:"application/json"}));
+  a.download="nmc_result.json";a.click();
+};
+
+/* ---------- rendering ---------- */
+let lastStatus=null;
+function refreshUI(d){
+  const running=d&&d.status==="running";
+  $("#run").disabled=!file||running;$("#reinit").disabled=running;
+  $("#run").textContent=running?"Running… "+(d.elapsed||0).toFixed(0)+"s":"Run on accelerator";
+}
+function appendLog(lines){
+  if(!lines.length)return; const p=$("#log");
+  lines.forEach(l=>{const s=el("div",l.startsWith("$ ")?"cmd":l.startsWith("[console]")?"sys":"",l||" ");p.append(s)});
+  p.scrollTop=p.scrollHeight;
+}
+function render(d){
+  lastStatus=d;
+  $("#title").textContent=d.title;document.title=d.title;
+  const sy=d.system;
+  $("#board").innerHTML="";
+  $("#board").append(document.createTextNode("Board "),Object.assign(el("b",null,sy.ip)),document.createTextNode(sy.temp!=null?"  ·  "+sy.temp.toFixed(0)+"°C":""));
+  $("#dot").className="dot"+(d.status==="running"?" busy":"");
+  refreshUI(d);
+  clearInterval(cycle);cycle=null;
+
+  const imgDone=file||d.image?"done":"";
+  let st=[imgDone,"","",""];
+  if(d.status==="idle"){setSteps(st);setChip("","Idle. Choose an image to begin.",false);
+    if(d.bringup_done)st[1]="done"; setSteps(st)}
+  else if(d.status==="running"){
+    const s=d.stage;
+    if(s==="bringup"){st[1]="active";setChip("boot","Bringing up the board…",true)}
+    else{st[1]="done";st[2]="active";
+      if(!d.image){setChip("boot","Finishing…",true)}
+      else if(d.phase){setChip(d.phase,{load:"Loading image and weights into the SRAM banks",compute:"PEs multiply and accumulate beside the memory",store:"Writing results back to the banks"}[d.phase],true)}
+      else{const ph=["load","compute","store"],cp=["Loading image and weights into the SRAM banks","PEs multiply and accumulate beside the memory","Writing results back to the banks"];
+        const go=()=>setChip(ph[cyc%3],cp[cyc%3],true);go();cycle=setInterval(()=>{cyc++;go()},2600)}}
+    setSteps(st)}
+  else if(d.status==="done"){
+    st=[imgDone,"done",d.image?"done":"","done"];if(!d.image)st[3]="";
+    setSteps(st);setChip("done",d.image?"Done in "+d.elapsed+" s":"Board is ready.",false)}
+  else{ // error
+    const failedBring=d.stage==="bringup";
+    st=[imgDone,failedBring?"err":"done",failedBring?"":"err",""];setSteps(st);
+    setChip("error",d.error||"Something went wrong.",false);showMsg(d.error||"")}
+  if(d.status==="done"&&d.result&&lastRendered!==d.run_id){lastRendered=d.run_id;renderResult(d.result)}
+}
+function renderResult(r){
+  lastResult=r;$("#results").style.display="block";
+  $("#demoBanner").style.display=r.demo?"inline-block":"none";
+  const p=r.predictions||[];
+  if(p.length){$("#rh").textContent="Prediction";$("#top1").textContent=p[0].label;
+    $("#conf").innerHTML="";$("#conf").append(el("b",null,p[0].score.toFixed(1)+"%"),(()=>{const b=el("div","bar");const i=el("i");i.style.width="0";b.append(i);requestAnimationFrame(()=>requestAnimationFrame(()=>i.style.width=Math.min(100,p[0].score)+"%"));return b})())}
+  else{$("#rh").textContent="Run complete";$("#top1").textContent="Finished in "+r.wall_seconds+" s";$("#conf").textContent="No class labels were found in the output."}
+  const pe=$("#preds");pe.innerHTML="";
+  p.forEach(x=>{const row=el("div","r");row.append(el("span",null,x.label),el("span",null,x.score.toFixed(1)+"%"));const b=el("div","bar"),i=el("i");i.style.width=Math.min(100,x.score)+"%";b.append(i);row.append(b);pe.append(row)});
+  if(!p.length)pe.append(el("span",null,"—"));
+  const t=$("#tiles");t.innerHTML="";
+  const hl=[...r.highlights];hl.push({label:"Wall-clock run time",value:String(r.wall_seconds),unit:"s"});
+  hl.forEach(h=>{const d=el("div","tile");const v=el("div","v",h.value);if(h.unit)v.append(el("small",null,h.unit));d.append(el("div","k",h.label),v);t.append(d)});
+  const lt=$("#ltable");lt.innerHTML="";
+  if((r.layers||[]).length){
+    if(r.layer_header){const tr=el("tr");r.layer_header.forEach(x=>tr.append(el("th",null,x)));lt.append(tr)}
+    r.layers.forEach(L=>{const tr=el("tr");tr.append(el("td",null,L.name),el("td",null,L.shape));L.cols.forEach(x=>tr.append(el("td",null,x)));lt.append(tr)});
+  }else{lt.append(el("tr"))}
+  if(r.verdict){const v=r.verdict.toUpperCase();$("#rh").textContent="Network run "+v.toLowerCase();$("#rh").className=v==="PASSED"?"ok":"bad"}
+  const tb=$("#dtable");tb.innerHTML="";
+  Object.entries(r.details||{}).forEach(([k,v])=>{const tr=el("tr");tr.append(el("td",null,k),el("td",null,v));tb.append(tr)});
+  if(!Object.keys(r.details||{}).length){const tr=el("tr");tr.append(el("td",null,"No key: value lines found"),el("td",null,"see console"));tb.append(tr)}
+  $("#results").scrollIntoView({behavior:"smooth",block:"start"});
+}
+
+/* ---------- polling ---------- */
+let timer=null;
+async function poll(now){
+  clearTimeout(timer);let d=null;
+  try{
+    const r=await fetch(`/api/status?since=${since}&run=${runId}`);d=await r.json();
+    if(d.run_id!==runId){runId=d.run_id;$("#log").innerHTML="";$("#results").style.display="none";if(d.run_id!==lastRendered)lastRendered=-1}
+    appendLog(d.log);since=d.next;render(d);
+  }catch(e){$("#board").textContent="Board unreachable";$("#dot").className="dot off"}
+  timer=setTimeout(poll,d&&d.status==="running"?600:2000);
+}
+poll();
+</script>
+</body>
+</html>

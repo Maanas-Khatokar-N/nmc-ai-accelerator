@@ -1,0 +1,109 @@
+{
+ "banks": 4,
+ "layers": {
+  "conv1_1": {
+   "n_if": 4,
+   "tc": 1,
+   "tk": 16,
+   "policy": "spatial",
+   "est_cycles": 1354752,
+   "host_words": 3400384
+  },
+  "conv1_2": {
+   "n_if": 8,
+   "tc": 4,
+   "tk": 2,
+   "policy": "spatial",
+   "est_cycles": 28901376,
+   "host_words": 12943360
+  },
+  "conv2_1": {
+   "n_if": 4,
+   "tc": 4,
+   "tk": 4,
+   "policy": "spatial",
+   "est_cycles": 14450688,
+   "host_words": 6471680
+  },
+  "conv2_2": {
+   "n_if": 4,
+   "tc": 8,
+   "tk": 4,
+   "policy": "spatial",
+   "est_cycles": 28901376,
+   "host_words": 11337728
+  },
+  "conv3_1": {
+   "n_if": 2,
+   "tc": 8,
+   "tk": 8,
+   "policy": "spatial",
+   "est_cycles": 14450688,
+   "host_words": 5668864
+  },
+  "conv3_2": {
+   "n_if": 2,
+   "tc": 16,
+   "tk": 8,
+   "policy": "spatial",
+   "est_cycles": 28901376,
+   "host_words": 10534912
+  },
+  "conv3_3": {
+   "n_if": 2,
+   "tc": 16,
+   "tk": 8,
+   "policy": "spatial",
+   "est_cycles": 28901376,
+   "host_words": 10534912
+  },
+  "conv4_1": {
+   "n_if": 1,
+   "tc": 16,
+   "tk": 16,
+   "policy": "kernel",
+   "est_cycles": 14450688,
+   "host_words": 5267456
+  },
+  "conv4_2": {
+   "n_if": 1,
+   "tc": 32,
+   "tk": 16,
+   "policy": "kernel",
+   "est_cycles": 28901376,
+   "host_words": 10133504
+  },
+  "conv4_3": {
+   "n_if": 1,
+   "tc": 32,
+   "tk": 16,
+   "policy": "kernel",
+   "est_cycles": 28901376,
+   "host_words": 10133504
+  },
+  "conv5_1": {
+   "n_if": 1,
+   "tc": 64,
+   "tk": 4,
+   "policy": "kernel",
+   "est_cycles": 9437184,
+   "host_words": 2983936
+  },
+  "conv5_2": {
+   "n_if": 1,
+   "tc": 64,
+   "tk": 4,
+   "policy": "kernel",
+   "est_cycles": 9437184,
+   "host_words": 2983936
+  },
+  "conv5_3": {
+   "n_if": 1,
+   "tc": 64,
+   "tk": 4,
+   "policy": "kernel",
+   "est_cycles": 9437184,
+   "host_words": 2983936
+  }
+ }
+}
