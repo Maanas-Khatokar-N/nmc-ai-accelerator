@@ -60,11 +60,37 @@ class BoardBase:
         if self.shadow.get(off) != v:
             self.cfg_w(off, v); self.shadow[off] = v
     def invalidate_shadow(self): self.shadow.clear()
+    def soft_reset(self):
+        self.cfg_w(0xF04, 1)                     # wrapper SOFT_RESET (resets nmc_top only)
+        t0 = time.perf_counter()
+        while time.perf_counter() - t0 < 0.01: pass
+        self.invalidate_shadow()
+    def probe_pp_banks(self):
+        """Which banks have a post-proc unit (build parameter PP_BANKS)? A 1-element PP round per bank:
+        a bank WITH the unit finishes; a bank without it never completes the round (its done pulse is lost
+        in the start cycle - RTL quirk), which is undone with a soft reset."""
+        found = 0
+        for b in range(self.nb):
+            d = dict(src_base=0, dst_base=16, src_cols=1, out_rows=1, out_cols=1, channels=1, pool_k=1,
+                     src_ch_size=1, row_step=1, total_out=1, out_zp=0, relu_en=0)
+            for k, v in d.items(): self.cfg_w(BA(b, PP_F[k]), v)
+            self.cfg_w(G["QPMASK"], 1 << b); self.cfg_w(G["QPADDR"], 0)
+            self.cfg_w(G["QPBIAS"], 0); self.cfg_w(G["QPMULT"], 1); self.cfg_w(G["QPSHIFT"], 0)
+            self.cfg_w(G["PMASK"], 1 << b); self.cfg_w(G["CTRL"], 2)
+            t0 = time.perf_counter(); ok = False
+            while time.perf_counter() - t0 < 0.05:
+                if self.cfg_r(G["STATUS"]) == 0: ok = True; break
+            if ok: found |= 1 << b
+            else: self.soft_reset()
+        self.soft_reset(); self.cfg_w(G["IRQEN"], 0); self.cfg_w(G["IRQST"], 0xF)
+        return found
     def wait_idle(self, what="", timeout_s=30.0):
         t0 = time.perf_counter()
         while self.cfg_r(G["STATUS"]) != 0:
             if time.perf_counter() - t0 > timeout_s:
-                raise RuntimeError(f"timeout waiting for {what} (STATUS=0x{self.cfg_r(G['STATUS']):x})")
+                raise RuntimeError(f"timeout waiting for {what} (STATUS=0x{self.cfg_r(G['STATUS']):x} "
+                                   f"UNIT_BUSY=0x{self.cfg_r(0x14):x} PP_BUSY=0x{self.cfg_r(0x18):x} "
+                                   f"IRQ_STATUS=0x{self.cfg_r(G['IRQST']):x})")
 
 class HwBoard(BoardBase):
     def __init__(self, cfg_base, mem_base, nb, bank_words, cdma_base=None, dma_mem_base=None):
@@ -135,15 +161,17 @@ class HwBoard(BoardBase):
 class SimBoard(BoardBase):
     """Functional model of nmc_top behind the wrapper (bank memory + conv + post-proc engines + regs).
     Implements the same data layouts the bring-up script checks on the real board."""
-    def __init__(self, nb, bank_words):
+    def __init__(self, nb, bank_words, pp_banks=None):
         super().__init__(nb, bank_words)
+        self.pp_banks = (1 << nb) - 1 if pp_banks is None else pp_banks
+        self.stuck = False
         self.memw = np.zeros(nb * bank_words, dtype=np.uint32)
         self.regs = {}; self.qp = [dict() for _ in range(nb)]; self.qpaddr = 0
         self.stage = [np.zeros(bank_words, dtype=np.uint32) for _ in range(nb)]
         self.drainb = [np.zeros(bank_words, dtype=np.uint32) for _ in range(nb)]
         self.cycles = [0] * nb; self.cfg_writes = 0
     def cfg_r(self, off):
-        if off == G["STATUS"]: return 0
+        if off == G["STATUS"]: return 2 if self.stuck else 0
         for b in range(self.nb):
             if off == BA(b, PERF_TOTAL): return self.cycles[b] & 0xFFFFFFFF
         return self.regs.get(off, 0)
@@ -152,6 +180,8 @@ class SimBoard(BoardBase):
         return self.regs.get(BA(b, idx), 0)
     def cfg_w(self, off, v):
         self.cfg_writes += 1
+        if off == 0xF04 and v & 1:
+            self.stuck = False; self.regs = {}; self.qp = [dict() for _ in range(self.nb)]; return
         self.regs[off] = v
         if off == G["QPADDR"]: self.qpaddr = v
         elif off == G["QPSHIFT"]:
@@ -165,8 +195,10 @@ class SimBoard(BoardBase):
                 for b in range(self.nb):
                     if (self.regs.get(G["UMASK"], 0) >> b) & 1: self._conv(b)
             elif v & 2:
+                pm = self.regs.get(G["PMASK"], 0)
+                if pm & ~self.pp_banks: self.stuck = True; return       # models the lost done pulse
                 for b in range(self.nb):
-                    if (self.regs.get(G["PMASK"], 0) >> b) & 1: self._pp(b)
+                    if (pm >> b) & 1: self._pp(b)
     def _words(self, b, base, n): return self.memw[b * self.bank_words + base: b * self.bank_words + base + n]
     def _conv(self, b):
         f = lambda k: self.f(b, k)
@@ -253,8 +285,10 @@ def fc_sparse(x, wT, rows=1024):
 # ============================================================================= conv layer
 _PLANS = {}
 class ConvRunner:
-    def __init__(self, bd, host_pp=False, read_perf=True):
+    def __init__(self, bd, host_pp=False, read_perf=True, pp_banks=None):
         self.bd, self.host_pp, self.read_perf = bd, host_pp, read_perf
+        self.pp_banks = 0 if host_pp else ((1 << bd.nb) - 1 if pp_banks is None else pp_banks)
+        self.host_pp = self.pp_banks == 0      # no bank with a post-proc unit -> whole layer on the ARM
         self.qp_loaded = [None] * bd.nb          # (layer id, k0, k1) whose requant params are in the bank
         self.regs = {}                           # conv descriptor / UNIT_MASK values already written
 
@@ -283,6 +317,8 @@ class ConvRunner:
         steps = [(r, p) for r in range(len(rounds)) for p in range(len(passes))]
         if self.host_pp: acc = np.zeros((layer.Cout, layer.OH, layer.OW), dtype=np.int32)
         y = np.empty((layer.Cout, layer.OH // pool, layer.OW // pool), dtype=np.int8) if not self.host_pp else None
+        has_pp = lambda b: (self.pp_banks >> b) & 1
+        relu = bool(L["relu"])
         res_if, res_w = [None] * nb, [None] * nb
         st = dict(crit=0, macs=0, words_in=0, words_out=0, steps=len(steps), t_load=0.0, t_run=0.0, t_pp=0.0,
                   t_drain=0.0, t_prep=0.0)
@@ -327,7 +363,15 @@ class ConvRunner:
         pending = None                           # drained round waiting to be unpacked
         def unpack(pend):
             for b, j, buf in pend:
-                if self.host_pp:
+                if not self.host_pp and not has_pp(b):        # this bank has no post-proc unit: ARM, per tile
+                    t0 = time.perf_counter()
+                    n = j.nk * j.oh * j.ow
+                    a = buf[plan.of_base:plan.of_base + n].view(np.int32).reshape(j.nk, j.oh, j.ow).astype(np.int64)
+                    if pool > 1: a = vi.maxpool(a, pool)
+                    q = vi.requant(a, L["bias"][j.k0:j.k1], L["mult"][j.k0:j.k1], L["shift"][j.k0:j.k1], relu)
+                    y[j.k0:j.k1, j.oy0 // pool:j.oy0 // pool + a.shape[1], j.ox0 // pool:j.ox0 // pool + a.shape[2]] = q
+                    st["t_hostpp"] = st.get("t_hostpp", 0.0) + time.perf_counter() - t0
+                elif self.host_pp:
                     n = j.nk * j.oh * j.ow
                     acc[j.k0:j.k1, j.oy0:j.oy1, j.ox0:j.ox1] = buf[plan.of_base:plan.of_base + n].view(np.int32).reshape(j.nk, j.oh, j.ow)
                 else:
@@ -359,21 +403,22 @@ class ConvRunner:
             if not last: continue
             # ---- round finished: post-proc on chip, then drain ----
             jobs = [(b, j) for b, j in enumerate(rounds[r]) if j is not None]
-            if not self.host_pp:
-                self._load_qp(lid, L, jobs)
-                for b, j in jobs:
+            pp_jobs = [(b, j) for b, j in jobs if has_pp(b)] if not self.host_pp else []
+            if pp_jobs:
+                self._load_qp(lid, L, pp_jobs)
+                for b, j in pp_jobs:
                     ph, pw = j.oh // pool, j.ow // pool
                     d = dict(src_base=plan.of_base, dst_base=plan.pp_base, src_cols=j.ow, out_rows=ph, out_cols=pw,
                              channels=j.nk, pool_k=pool, src_ch_size=j.oh * j.ow, row_step=pool * j.ow,
                              total_out=j.nk * ph * pw, out_zp=0, relu_en=1 if L["relu"] else 0)
                     for k, v in d.items(): bd.cfg_set(BA(b, PP_F[k]), v)
-                bd.cfg_set(G["PMASK"], mask)
+                bd.cfg_set(G["PMASK"], sum(1 << b for b, _ in pp_jobs))
                 bd.cfg_w(G["CTRL"], 2)                   # PP_START
                 bd.wait_idle(f"{L['name']} post-proc round {r}")
             t3 = time.perf_counter(); st["t_pp"] += t3 - t2
             pend = []
             for b, j in jobs:
-                if self.host_pp: off, n = plan.of_base, j.nk * j.oh * j.ow
+                if self.host_pp or not has_pp(b): off, n = plan.of_base, j.nk * j.oh * j.ow
                 else: off, n = plan.pp_base, j.nk * (j.oh // pool) * (j.ow // pool)
                 pend.append((b, j, bd.drain(b, off, n))); st["words_out"] += n
             # the drain buffer of a bank is reused next round: copy out before the next drain (it is
@@ -405,8 +450,8 @@ class ConvRunner:
             for b in banks: self.qp_loaded[b] = (lid_, k0, k1)
 
 # ============================================================================= network
-def run_network(bd, model, x, tilings, host_pp=False, read_perf=True, ref=None, log=print, mhz=60.0):
-    cr = ConvRunner(bd, host_pp=host_pp, read_perf=read_perf)
+def run_network(bd, model, x, tilings, host_pp=False, read_perf=True, ref=None, log=print, mhz=60.0, pp_banks=None):
+    cr = ConvRunner(bd, host_pp=host_pp, read_perf=read_perf, pp_banks=pp_banks)
     tot = dict(crit=0, macs=0, words=0, load=0.0, run=0.0, pp=0.0, drain=0.0, fc=0.0, hostpp=0.0)
     acts, ok = [], True
     t_all = time.perf_counter()

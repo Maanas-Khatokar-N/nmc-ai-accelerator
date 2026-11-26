@@ -37,6 +37,9 @@ def main():
     ap.add_argument("--banks", type=int, default=4); ap.add_argument("--bank-words", type=int, default=32768)
     ap.add_argument("--mhz", type=float, help="set FCLK0 to this (MHz) after loading the overlay")
     ap.add_argument("--host-pp", action="store_true", help="requant/ReLU/pool on the ARM instead of on chip")
+    ap.add_argument("--pp-banks", type=lambda x: int(x, 0),
+                    help="banks with a post-proc unit (PP_BANKS build parameter); default: detected at start")
+    ap.add_argument("--sim-pp-banks", type=lambda x: int(x, 0), help="--sim only: model a build with these PP banks")
     ap.add_argument("--no-perf", action="store_true", help="do not read the cycle counters (saves a little time)")
     ap.add_argument("--json", help="write predictions + timings of the last image to this file (web console)")
     ap.add_argument("--prep-only", action="store_true", help="only build the transposed FC weight files, then exit")
@@ -47,7 +50,7 @@ def main():
     til = json.load(open(a.tilings or os.path.join(a.model, "tilings.json")))["layers"]
     mhz = 60.0
     if a.sim:
-        bd = nf.SimBoard(a.banks, a.bank_words); print("SIMULATION (functional model, no hardware)")
+        bd = nf.SimBoard(a.banks, a.bank_words, pp_banks=a.sim_pp_banks); print("SIMULATION (functional model, no hardware)")
     else:
         if not a.bit: ap.error("--bit is required (or --sim)")
         from pynq import Overlay
@@ -69,6 +72,12 @@ def main():
         bd = nf.HwBoard(a.cfg_base, a.mem_base, a.banks, a.bank_words, cdma_base=cdma, dma_mem_base=a.dma_mem_base)
         bd.cfg_w(nf.G["IRQEN"], 0)
 
+    pp_banks = a.pp_banks
+    if not a.host_pp and pp_banks is None:
+        pp_banks = bd.probe_pp_banks()
+    if not a.host_pp:
+        print(f"post-proc on chip in banks 0x{pp_banks:x}" + ("" if pp_banks == (1 << a.banks) - 1 else
+              " (the other banks' requant/pool runs on the ARM)"))
     inputs = []
     if a.image:
         from imagenet_pre import preprocess, quantize_input
@@ -91,7 +100,7 @@ def main():
     for name, x, t_pre in inputs:
         print(f"\n=== {name} ===")
         logits, acts, ok, tot, wall = nf.run_network(bd, model, x, til, host_pp=a.host_pp, read_perf=not a.no_perf,
-                                                     ref=ref, mhz=mhz)
+                                                     ref=ref, mhz=mhz, pp_banks=pp_banks)
         ok_all &= ok
         if logits is not None and np.ndim(logits) == 1 and logits.size > 10:
             print("top-5:")
