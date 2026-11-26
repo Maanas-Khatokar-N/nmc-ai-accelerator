@@ -41,7 +41,8 @@
 //   - irq = nmc_top irq_o (level, active high). Connect to the PS IRQ_F2P
 //     (level-sensitive). Clear through IRQ_STATUS (W1C) in nmc_regs.
 //
-// Throughput (bring-up, not optimised): ~3 cycles per read beat, ~2-3 per write beat.
+// Throughput: 1 beat per clock for reads and full-strobe writes (fpga-perf rework); feed
+// the port from a DMA (AXI CDMA on S_AXI_HP0) - single ARM stores cannot use it.
 // Use 4-byte aligned accesses / bursts for data. Do not use the SRAM window with
 // a cacheable mapping from Linux (use /dev/mem O_SYNC or UIO, or device memory attributes).
 // ============================================================================
@@ -263,36 +264,72 @@ module nmc_axi_wrapper #(
     end
 
     // ------------------------------------------------------------------
-    // MEM port: AXI4 slave FSM (one burst at a time)
+    // MEM port: AXI4 slave, streaming (one burst at a time, one beat per clock)
+    //
+    //   write: full-strobe beats go through a 1-deep pipeline register (wp_*) and are
+    //          written to the SRAM the cycle after they are accepted, while the next
+    //          beat is accepted -> 1 beat / clock (the bus is only lost to cfg accesses).
+    //          Partial-strobe beats wait until the pipeline is empty and take the old
+    //          read-modify-write path (rare: byte stores from the ARM).
+    //   read : requests are issued every clock while a 4-entry FIFO has room; nmc_top
+    //          returns data exactly 1 cycle after a request, so the FIFO can never
+    //          overflow (credit = entries + request in flight).
     // ------------------------------------------------------------------
-    localparam [3:0] M_IDLE = 4'd0,  M_WDATA = 4'd1, M_WRD  = 4'd2, M_WRDRESP = 4'd3,
-                     M_WREQ = 4'd4,  M_WRESP = 4'd5, M_WNEXT = 4'd6, M_B = 4'd7,
-                     M_RREQ = 4'd8,  M_RRESP = 4'd9, M_ROUT  = 4'd10;
+    localparam [3:0] M_IDLE = 4'd0,  M_WDATA = 4'd1, M_WRD   = 4'd2, M_WRDRESP = 4'd3,
+                     M_WREQ = 4'd4,  M_WRESP = 4'd5, M_WNEXT = 4'd6, M_WDRAIN  = 4'd7,
+                     M_B    = 4'd8,  M_READ  = 4'd9;
     reg [3:0]        mst;
     reg [ID_W-1:0]   m_id;
-    reg [MEM_AW-1:0] m_addr;
-    reg [7:0]        m_left;          // beats remaining after the current one
+    reg [MEM_AW-1:0] m_addr;          // write: address of the next beat to accept / RMW beat
+    reg [7:0]        m_left;          // write: beats remaining after the current one
     reg [1:0]        m_burst;
     reg              m_err;
-    reg [31:0]       m_wdata, m_rdata;
+    reg [31:0]       m_wdata;
     reg [3:0]        m_wstrb;
+
+    function [MEM_AW-1:0] next_addr(input [MEM_AW-1:0] a, input [1:0] burst);
+        next_addr = (burst == 2'b00) ? a : {a[MEM_AW-1:2] + 1'b1, 2'b00};
+    endfunction
+
+    // ---- write pipeline register ----
+    reg              wp_valid;
+    reg [MEM_AW-1:0] wp_addr;
+    reg [31:0]       wp_data;
+
+    // ---- read side ----
+    reg [MEM_AW-1:0] r_addr;          // next address to request
+    reg [8:0]        r_iss_left;      // requests still to issue
+    reg [7:0]        r_out_left;      // beats remaining after the FIFO head
+    reg              r_pend;          // a read was issued last cycle -> data on the bus now
+    reg [31:0]       rf_mem [0:3];
+    reg [1:0]        rf_wp, rf_rp;
+    reg [2:0]        rf_cnt;
+
+    wire bus_free  = ~c_req & ~core_rst;                          // config port has priority
+    wire wp_issue  = wp_valid & bus_free;
+    wire rmw_req   = (mst == M_WRD) | (mst == M_WREQ);
+    wire rmw_gnt   = rmw_req & ~wp_valid & bus_free;
+    wire r_issue   = (mst == M_READ) & (r_iss_left != 9'd0) & bus_free
+                   & ({1'b0, rf_cnt} + {3'd0, r_pend} <= 4'd3);
+
+    wire w_full    = (s_axi_mem_wstrb == 4'hF);
+    wire w_room    = ~wp_valid | wp_issue;                         // pipeline slot free this cycle
+    assign s_axi_mem_wready = (mst == M_WDATA) & (w_full ? w_room : ~wp_valid);
+    wire w_acc     = s_axi_mem_wvalid & s_axi_mem_wready;
 
     wire m_idle = (mst == M_IDLE) & ~rst;
     assign s_axi_mem_awready = m_idle;
     assign s_axi_mem_arready = m_idle & ~s_axi_mem_awvalid;      // writes first
-    assign s_axi_mem_wready  = (mst == M_WDATA);
     assign s_axi_mem_bvalid  = (mst == M_B);
     assign s_axi_mem_bid     = m_id;
     assign s_axi_mem_bresp   = m_err ? SLVERR : OKAY;
-    assign s_axi_mem_rvalid  = (mst == M_ROUT);
-    assign s_axi_mem_rid     = m_id;
-    assign s_axi_mem_rdata   = m_rdata;
-    assign s_axi_mem_rresp   = m_err ? SLVERR : OKAY;
-    assign s_axi_mem_rlast   = (m_left == 8'd0);
 
-    wire m_req = (mst == M_WRD) | (mst == M_WREQ) | (mst == M_RREQ);
-    wire m_we  = (mst == M_WREQ);
-    wire m_gnt = m_req & ~c_req & ~core_rst;
+    wire rf_pop = s_axi_mem_rvalid & s_axi_mem_rready;
+    assign s_axi_mem_rvalid  = (mst == M_READ) & (rf_cnt != 3'd0);
+    assign s_axi_mem_rid     = m_id;
+    assign s_axi_mem_rdata   = rf_mem[rf_rp];
+    assign s_axi_mem_rresp   = m_err ? SLVERR : OKAY;
+    assign s_axi_mem_rlast   = (r_out_left == 8'd0);
 
     // merge for partial-strobe writes: strobed bytes from the write data, rest from the SRAM word
     wire [31:0] merged = { m_wstrb[3] ? m_wdata[31:24] : bus_rdata[31:24],
@@ -300,15 +337,32 @@ module nmc_axi_wrapper #(
                            m_wstrb[1] ? m_wdata[15:8]  : bus_rdata[15:8],
                            m_wstrb[0] ? m_wdata[7:0]   : bus_rdata[7:0] };
 
-    wire [MEM_AW-1:0] m_addr_next = (m_burst == 2'b00) ? m_addr
-                                  : {m_addr[MEM_AW-1:2] + 1'b1, 2'b00};
-
     always @(posedge aclk or posedge rst) begin
         if (rst) begin
             mst <= M_IDLE; m_id <= {ID_W{1'b0}}; m_addr <= {MEM_AW{1'b0}};
             m_left <= 8'd0; m_burst <= 2'b01; m_err <= 1'b0;
-            m_wdata <= 32'd0; m_rdata <= 32'd0; m_wstrb <= 4'd0;
+            m_wdata <= 32'd0; m_wstrb <= 4'd0;
+            wp_valid <= 1'b0; wp_addr <= {MEM_AW{1'b0}}; wp_data <= 32'd0;
+            r_addr <= {MEM_AW{1'b0}}; r_iss_left <= 9'd0; r_out_left <= 8'd0; r_pend <= 1'b0;
+            rf_wp <= 2'd0; rf_rp <= 2'd0; rf_cnt <= 3'd0;
         end else begin
+            // ---------------- write pipeline register ----------------
+            if (w_acc & w_full) begin
+                wp_valid <= 1'b1; wp_addr <= m_addr; wp_data <= s_axi_mem_wdata;
+            end else if (wp_issue) begin
+                wp_valid <= 1'b0;
+            end
+
+            // ---------------- read FIFO ----------------
+            r_pend <= r_issue;
+            if (r_pend) begin rf_mem[rf_wp] <= bus_rdata; rf_wp <= rf_wp + 2'd1; end
+            if (rf_pop) rf_rp <= rf_rp + 2'd1;
+            rf_cnt <= rf_cnt + {2'd0, r_pend} - {2'd0, rf_pop};
+            if (r_issue) begin
+                r_addr     <= next_addr(r_addr, m_burst);
+                r_iss_left <= r_iss_left - 9'd1;
+            end
+
             case (mst)
                 M_IDLE: begin
                     if (s_axi_mem_awvalid) begin
@@ -317,45 +371,47 @@ module nmc_axi_wrapper #(
                         m_err <= s_axi_mem_awburst[1];                // WRAP / reserved
                         mst <= M_WDATA;
                     end else if (s_axi_mem_arvalid) begin
-                        m_id <= s_axi_mem_arid;  m_addr <= s_axi_mem_araddr;
-                        m_left <= s_axi_mem_arlen; m_burst <= s_axi_mem_arburst;
+                        m_id <= s_axi_mem_arid;  r_addr <= s_axi_mem_araddr;
+                        r_iss_left <= {1'b0, s_axi_mem_arlen} + 9'd1;
+                        r_out_left <= s_axi_mem_arlen; m_burst <= s_axi_mem_arburst;
                         m_err <= s_axi_mem_arburst[1];
-                        mst <= M_RREQ;
+                        mst <= M_READ;
                     end
                 end
 
                 // ---------------- write burst ----------------
-                M_WDATA: if (s_axi_mem_wvalid) begin
-                    m_wdata <= s_axi_mem_wdata;
-                    m_wstrb <= s_axi_mem_wstrb;
-                    if (s_axi_mem_wstrb == 4'hF)      mst <= M_WREQ;
-                    else if (s_axi_mem_wstrb == 4'h0) mst <= M_WNEXT;
-                    else                              mst <= M_WRD;   // read-modify-write
+                M_WDATA: if (w_acc) begin
+                    if (w_full | (s_axi_mem_wstrb == 4'h0)) begin       // streamed (or empty) beat
+                        if (m_left == 8'd0) mst <= M_WDRAIN;
+                        else begin
+                            m_left <= m_left - 8'd1;
+                            m_addr <= next_addr(m_addr, m_burst);
+                        end
+                    end else begin                                      // partial strobe: RMW
+                        m_wdata <= s_axi_mem_wdata;
+                        m_wstrb <= s_axi_mem_wstrb;
+                        mst <= M_WRD;
+                    end
                 end
-                M_WRD:     if (m_gnt) mst <= M_WRDRESP;
+                M_WRD:     if (rmw_gnt) mst <= M_WRDRESP;
                 M_WRDRESP: begin m_wdata <= merged; mst <= M_WREQ; end
-                M_WREQ:    if (m_gnt) mst <= M_WRESP;
+                M_WREQ:    if (rmw_gnt) mst <= M_WRESP;
                 M_WRESP:   mst <= M_WNEXT;
                 M_WNEXT: begin
                     if (m_left == 8'd0) mst <= M_B;
                     else begin
                         m_left <= m_left - 8'd1;
-                        m_addr <= m_addr_next;
+                        m_addr <= next_addr(m_addr, m_burst);
                         mst    <= M_WDATA;
                     end
                 end
+                M_WDRAIN: if (~wp_valid | wp_issue) mst <= M_B;           // last beat written
                 M_B: if (s_axi_mem_bready) mst <= M_IDLE;
 
                 // ---------------- read burst ----------------
-                M_RREQ:  if (m_gnt) mst <= M_RRESP;
-                M_RRESP: begin m_rdata <= bus_rdata; mst <= M_ROUT; end
-                M_ROUT:  if (s_axi_mem_rready) begin
-                    if (m_left == 8'd0) mst <= M_IDLE;
-                    else begin
-                        m_left <= m_left - 8'd1;
-                        m_addr <= m_addr_next;
-                        mst    <= M_RREQ;
-                    end
+                M_READ: if (rf_pop) begin
+                    if (r_out_left == 8'd0) mst <= M_IDLE;               // all requests done by now
+                    else r_out_left <= r_out_left - 8'd1;
                 end
 
                 default: mst <= M_IDLE;
@@ -366,12 +422,17 @@ module nmc_axi_wrapper #(
     // ------------------------------------------------------------------
     // Arbiter: config port wins, SRAM port waits (config accesses are rare)
     // ------------------------------------------------------------------
+    wire              m_req  = wp_valid | rmw_req | r_issue;
+    wire              m_we   = wp_valid | (mst == M_WREQ);
+    wire [MEM_AW-1:0] m_badr = wp_valid ? wp_addr : (r_issue ? r_addr : m_addr);
+    wire [31:0]       m_bwd  = wp_valid ? wp_data : m_wdata;
+
     wire [TOP_AW-1:0] cfg_baddr = {1'b1, {(MEM_BYTE_AW-12){1'b0}}, c_addr};
-    wire [TOP_AW-1:0] mem_baddr = {1'b0, m_addr[MEM_BYTE_AW-1:0]};
+    wire [TOP_AW-1:0] mem_baddr = {1'b0, m_badr[MEM_BYTE_AW-1:0]};
 
     assign bus_req   = (c_req | m_req) & ~core_rst;
     assign bus_we    = c_req ? c_we    : m_we;
     assign bus_addr  = c_req ? cfg_baddr : mem_baddr;
-    assign bus_wdata = c_req ? c_wdata : m_wdata;
+    assign bus_wdata = c_req ? c_wdata : m_bwd;
 
 endmodule

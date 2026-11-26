@@ -6,7 +6,7 @@
 module postproc_tb;
     localparam ADDR_WIDTH = 17, DIM_WIDTH = 16, NM = 8, DEPTH_PM = 4096;
     localparam MAW = $clog2(DEPTH_PM), CAW = 3 + MAW;
-    localparam SRC_BASE = 0, DST_BASE = 20000;
+    parameter SRC_BASE = 0, DST_BASE = 20000;   // DST_BASE = SRC_BASE: in-place (used by the DMA runtime)
 
     reg clk = 0, rst = 1;  always #5 clk = ~clk;
 
@@ -88,7 +88,8 @@ module postproc_tb;
 
         #22 rst = 0;
         for (i = 0; i < n_src;  i = i + 1) core_write(SRC_BASE + i, src_mem[i]);
-        for (i = 0; i < n_dst + 16; i = i + 1) core_write(DST_BASE + i, 32'hDEADBEEF);
+        if (DST_BASE != SRC_BASE)                       // in-place: the OFMap itself is the guard-free dst
+            for (i = 0; i < n_dst + 16; i = i + 1) core_write(DST_BASE + i, 32'hDEADBEEF);
 
         for (i = 0; i < ch; i = i + 1) begin
             @(negedge clk); qp_we = 1; qp_wa = i; qp_b = qpm[3*i]; qp_m = qpm[3*i+1]; qp_s = qpm[3*i+2];

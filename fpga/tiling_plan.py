@@ -118,9 +118,16 @@ def assign(spatial, ktiles, policy, nb=NUM_BANKS):
 
 def align(x, a=8): return (x + a - 1)//a*a
 
-def build_plan(L, T, policy="spatial", bank_words=BANK_WORDS, nb=None):
+def build_plan(L, T, policy="spatial", bank_words=BANK_WORDS, nb=None, pp_pool=0, with_stats=True):
+    """pp_pool > 0: the on-chip post-proc unit (max-pool -> requant -> ReLU) runs on every finished job, in
+    place over the OFMap region (int8 per word, dense). Pool layers then need pool-aligned tiles."""
     if nb is None: nb = NUM_BANKS          # module default (4); the PYNQ-Z2 build passes nb=2
     spatial, ktiles = make_jobs(L, T)
+    if pp_pool > 1:
+        for r, c in spatial:
+            for a0, a1 in (r, c):
+                if a0 % pp_pool or (a1 - a0) % pp_pool:
+                    raise ValueError(f"tile {a0}:{a1} not aligned to the {pp_pool}x{pp_pool} pool")
     passes = channel_passes(L.Cin, T.tc, cin_group_max(L.K, L.S))
     max_if = max(in_extent(r[1]-r[0], L)*in_extent(c[1]-c[0], L) for r, c in spatial)
     max_cg = max(c1-c0 for c0, c1 in passes)
@@ -129,11 +136,14 @@ def build_plan(L, T, policy="spatial", bank_words=BANK_WORDS, nb=None):
     w_w  = max_nk*max_cg*L.K*L.K
     of_w = max_nk*max((r[1]-r[0])*(c[1]-c[0]) for r, c in spatial)
     if_base = 0; w_base = align(if_w); of_base = align(w_base + w_w); used = of_base + of_w + 16
+    pp_base = None
+    if pp_pool: pp_base = of_base          # post-proc runs in place over the OFMap (verified: postproc_golden.py --inplace)
     if used > bank_words:
         raise ValueError(f"tile does not fit a bank: {used} > {bank_words} words")
     rounds = assign(spatial, ktiles, policy, nb)
     p = Plan(L, T, policy, spatial, ktiles, passes, rounds, if_base, w_base, of_base, used)
-    p.stats = stats(p)
+    p.pp_base, p.pp_pool = pp_base, pp_pool
+    if with_stats: p.stats = stats(p)
     return p
 
 def pass_loads(plan):

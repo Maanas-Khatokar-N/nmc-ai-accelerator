@@ -7,3 +7,5 @@ sim/waveform
 sim/
 scripts/__pycache__/
 patch/
+fpga/__pycache__/
+fpga/models/*/*_wT.npy

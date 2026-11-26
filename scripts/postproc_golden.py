@@ -47,7 +47,7 @@ def wh(path, words):
     with open(path, "w") as f:
         for w in words: f.write("%08x\n" % (int(w) & 0xFFFFFFFF))
 
-def run_case(case, noise, rng, vvp):
+def run_case(case, noise, rng, vvp, inplace=False):
     rows, cols, ch, pool, relu, zp, mag = case
     acc = rng.integers(-(1 << mag), 1 << mag, size=(ch, rows, cols), dtype=np.int64)
     acc = np.clip(acc, -(1 << 31), (1 << 31) - 1)
@@ -81,6 +81,7 @@ def run_case(case, noise, rng, vvp):
     upper_ok = bool(np.all(words >> 8 == 0))                           # low byte only, upper 24 bits zero
     got = (words & 0xFF).astype(np.uint8).view(np.int8).astype(np.int64).reshape(gold.shape)
     guard_ok = all(l.lower() == "deadbeef" for l in lines[n:n+16]) and len(lines) >= n + 16
+    if inplace: guard_ok = len(lines) >= n + 16           # words after the output are the (consumed) OFMap
     bad = np.argwhere(got != gold)
     sat = 100.0 * np.mean((gold == 127) | (gold == (zp if relu else -128)))
     ok = len(bad) == 0 and upper_ok and guard_ok
@@ -95,14 +96,15 @@ def run_case(case, noise, rng, vvp):
 
 def main():
     ap = argparse.ArgumentParser(); ap.add_argument("--seed", type=int, default=1)
+    ap.add_argument("--inplace", action="store_true", help="dst_base = src_base (output overwrites the OFMap, as the DMA runtime does)")
     a = ap.parse_args()
     os.makedirs(DATA, exist_ok=True); os.makedirs("sim/waveform", exist_ok=True); os.makedirs("sim/build", exist_ok=True)
     vvp = "sim/build/postproc.vvp"
     rtl = sorted(glob.glob("rtl/memory/*.v") + glob.glob("rtl/postproc/*.v"))
-    r = subprocess.run(["iverilog", "-g2012", "-o", vvp, "tb/integration/postproc_tb.v"] + rtl, capture_output=True, text=True)
+    r = subprocess.run(["iverilog", "-g2012", "-o", vvp] + (["-Ppostproc_tb.DST_BASE=0"] if a.inplace else []) + ["tb/integration/postproc_tb.v"] + rtl, capture_output=True, text=True)
     if r.returncode: print(r.stderr); sys.exit(2)
     rng = np.random.default_rng(a.seed)
-    res = [run_case(c, nz, rng, vvp) for c in CASES for nz in (0, 1)]
+    res = [run_case(c, nz, rng, vvp, a.inplace) for c in CASES for nz in (0, 1)]
     print(f"\n{sum(res)}/{len(res)} cases match the NumPy golden model")
     sys.exit(0 if all(res) else 1)
 

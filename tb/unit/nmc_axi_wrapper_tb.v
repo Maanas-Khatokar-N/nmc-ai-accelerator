@@ -107,6 +107,7 @@ module nmc_axi_wrapper_tb;
     task mem_write(input [MAW-1:0] a, input integer beats, input [3:0] strb, input [1:0] burst, output [1:0] resp);
         reg done;
         integer i;
+    time t_start; integer t_w, t_r;
         begin
             @(negedge clk);
             m_awid = 16'h1A5; m_awaddr = a; m_awlen = beats - 1; m_awburst = burst; m_awvalid = 1;
@@ -156,6 +157,7 @@ module nmc_axi_wrapper_tb;
     reg [31:0] rd;
     reg [1:0]  rsp, rsp2;
     reg [31:0] rd2;
+    time t_start; integer t_w, t_r;
     integer i;
 
     initial begin
@@ -254,6 +256,54 @@ module nmc_axi_wrapper_tb;
             end
         join
         for (i = 0; i < 64; i = i + 1) check("burst data intact", rbuf[i], i * 32'h01010101);
+
+
+        // ---------------- streaming throughput: 256-beat write / read, must be ~1 beat per clock ----------------
+        for (i = 0; i < 256; i = i + 1) wbuf[i] = 32'h7700_0000 + i * 7;
+        t_start = $time;  mem_write(19'h48000, 256, 4'hF, 2'b01, rsp);  t_w = ($time - t_start) / 10;
+        t_start = $time;  mem_read (19'h48000, 256, 2'b01, rsp);        t_r = ($time - t_start) / 10;
+        for (i = 0; i < 256; i = i + 1) check("stream word", rbuf[i], 32'h7700_0000 + i * 7);
+        $display("256-beat write burst: %0d clocks, read burst: %0d clocks", t_w, t_r);
+        if (t_w > 270 || t_r > 270) begin $display("FAIL streaming too slow"); errors = errors + 1; end
+
+        // ---------------- read with rready back-pressure ----------------
+        fork
+            mem_read(19'h48000, 200, 2'b01, rsp);
+            begin
+                repeat (300) begin @(negedge clk); m_rready = ($random & 3) != 0; end
+                m_rready = 1;
+            end
+        join
+        m_rready = 1;
+        for (i = 0; i < 200; i = i + 1) check("backpressure word", rbuf[i], 32'h7700_0000 + i * 7);
+
+        // ---------------- cfg writes while a streamed write burst runs ----------------
+        for (i = 0; i < 128; i = i + 1) wbuf[i] = 32'h3300_0000 + i;
+        fork
+            mem_write(19'h50000, 128, 4'hF, 2'b01, rsp);
+            begin
+                repeat (20) @(negedge clk);
+                cfg_write(12'h008, 32'h1, rsp2);  check("cfg write during stream", rsp2, 0);
+                cfg_read (12'h008, rd2, rsp2);    check("cfg readback during stream", rd2, 1);
+            end
+        join
+        mem_read(19'h50000, 128, 2'b01, rsp);
+        for (i = 0; i < 128; i = i + 1) check("stream+cfg word", rbuf[i], 32'h3300_0000 + i);
+
+        // ---------------- partial strobe in the middle of a full-strobe burst ----------------
+        for (i = 0; i < 8; i = i + 1) wbuf[i] = 32'hFFFF_FFFF;
+        mem_write(19'h50800, 8, 4'hF, 2'b01, rsp);
+        for (i = 0; i < 8; i = i + 1) wbuf[i] = 32'hA0A0_A000 + i;
+        fork
+            mem_write(19'h50800, 8, 4'hF, 2'b01, rsp);
+            begin   // flip beat 3's strobe to the low byte while it is presented
+                wait (m_wvalid && m_wdata == 32'hA0A0_A003); m_wstrb = 4'b0001;
+                wait (m_wdata == 32'hA0A0_A004); m_wstrb = 4'hF;
+            end
+        join
+        mem_read(19'h50800, 8, 2'b01, rsp);
+        for (i = 0; i < 8; i = i + 1)
+            check("mixed strobe burst", rbuf[i], (i == 3) ? 32'hFFFF_FF03 : 32'hA0A0_A000 + i);
 
         if (errors == 0) $display("ALL TESTS PASSED"); else $display("%0d ERRORS", errors);
         $finish;
